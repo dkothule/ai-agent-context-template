@@ -8,13 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) loosely and u
 
 ## [1.2.2] - 2026-09-09
 
-> **Unpublished release candidate.** September 9 is the planned publication date; confirm the actual date before publishing.
+> Maintenance release tracking how the frontier CLIs' hook lifecycles have evolved — session-end capture on Claude Code, Cursor, and Codex, reminders moved to session start, leaner startup guidance, and hardened upgrade migration. No dependency, CLI, or Node requirement changes.
 
 ### Fixed
 
 - **Autosave collisions** — pre-compact hooks reserve filenames atomically, using seconds and collision suffixes. Discovery picks the newest modification time with deterministic filename ties, including legacy autosaves.
 - **Hook script renamed** — `post-compact-reminder.sh` is now `context-reminder.sh`. It stopped being post-compact-specific once it began firing on startup/resume, emitting the daily-log reminder, and surfacing session-end autosaves; Codex also invokes it for `PostCompact`, so the name is event-neutral. Upgrades remove the old script and its registrations automatically — a retired-script list in the installer deletes hook files AI Context no longer ships, which also clears the `session-log-check.sh` orphan left by the reminder move.
-- **Session-end capture** — a session ending with no log for today now writes a `sessionend-autosave.md` breadcrumb directly (end reason, branch, working tree, diffstat, recent commits, transcript pointer) instead of asking the agent to do it. Restores a guarantee documented since v0.4.x whose mechanism never worked: the retired hook emitted a reminder that Claude Code, Cursor, and Codex all discard at session end. Fires on every exit reason, `resume` included. Cursor's `sessionEnd` does not fire for cloud agents, so capture does not run there. The session-start hook surfaces autosaves from both sources, labels which kind, and reports how many are pending.
+- **Session-end capture** — a session ending with no log for today now writes a `sessionend-autosave.md` breadcrumb directly (end reason, branch, working tree, diffstat, recent commits, transcript pointer) instead of asking the agent to do it. Session logs and pre-compact autosaves already carried context between agents; what was missing was an automatic artifact when a session simply ended without compacting. The retired hook asked the agent to write one, but Claude Code, Cursor, and Codex all discard session-end hook output, so the ask never arrived. Fires on every exit reason, `resume` included. Cursor's `sessionEnd` does not fire for cloud agents, so capture does not run there. The session-start hook surfaces autosaves from both sources, labels which kind, and reports how many are pending.
 - **Session-log reminders** — moved to session start for Claude Code, Cursor, and Codex with forward-looking wording. Upgrades remove retired Stop/sessionEnd handlers, broaden Claude’s matcher, and preserve user handlers sharing a registration. Legacy uninstall and reapply remain supported.
 
 ### Changed
