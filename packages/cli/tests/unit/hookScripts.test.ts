@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm, chmod, utimes } from 'node:fs/promises';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 const agents = ['claude', 'cursor', 'codex'];
 const bashLauncher = process.platform === 'win32' ? `${process.env.ProgramFiles}/Git/bin/bash.exe` : '/bin/bash';
@@ -54,6 +55,44 @@ function run(agent: string, script = 'context-reminder.sh', input = {}, extraEnv
     child.stdin.end(JSON.stringify(input));
   });
 }
+// Keep the parent alive until tree termination: killing only Bash on Windows
+// or resolving on a fixed timer leaves git/sleep holding the fixture open.
+async function runAndKill(args: string[], cwd: string, input: object, ms = 2_000) {
+  const child = spawn(bash, args, { cwd, env, detached: process.platform !== 'win32' });
+  let stderr = '';
+  child.stdout.resume();
+  child.stderr.on('data', data => { stderr += data; });
+  // Store spawn errors as values so they cannot become unhandled rejections
+  // while the deadline is pending.
+  const closed = new Promise<Error | null>(resolve => {
+    child.once('error', resolve);
+    child.once('close', () => resolve(null));
+  });
+  child.stdin.on('error', () => { /* a spawn/early-exit error is reported below */ });
+  child.stdin.end(JSON.stringify(input));
+  await new Promise(resolve => setTimeout(resolve, ms));
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
+    throw new Error(`Hook exited before the kill deadline: ${stderr}`);
+  }
+  if (process.platform === 'win32') {
+    // Invoke natively, outside Git Bash's argument conversion and isolated PATH.
+    await promisify(execFile)(join(process.env.SystemRoot!, 'System32', 'taskkill.exe'),
+      ['/PID', String(child.pid), '/T', '/F'], { timeout: 5_000 });
+  } else {
+    process.kill(-child.pid, 'SIGKILL');
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const error = await Promise.race([
+      closed,
+      new Promise<Error>(resolve => {
+        timeout = setTimeout(() => resolve(new Error(`Hook tree did not close after termination: ${stderr}`)), 5_000);
+      }),
+    ]);
+    if (error) throw error;
+  } finally { clearTimeout(timeout); }
+}
+
 const today = () => {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -264,34 +303,14 @@ describe('session-end capture', () => {
     expect(body).toContain(`local_transcript_ref: ${tricky}`);
   });
 
-  // Spawn and kill after `ms`, resolving rather than rejecting — models an agent
-  // enforcing its session-end ceiling mid-run.
-  function runAndKill(agent: string, input: object, ms: number) {
-    const file = fileURLToPath(new URL(`../../src/templates/${agent}/hooks/session-end-capture.sh`, import.meta.url));
-    return new Promise<void>(resolve => {
-      // detached so we can signal the whole group: killing bash alone leaves the
-      // hanging git grandchild holding the stdio pipes, so 'close' never fires.
-      const child = spawn(bash, [shellPath(file)], { cwd: project, env, detached: process.platform !== 'win32' });
-      const stop = () => {
-        try {
-          if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
-          else child.kill('SIGKILL');
-        } catch { /* already gone */ }
-      };
-      setTimeout(stop, ms);
-      // Resolve on our own schedule rather than waiting for 'close'.
-      setTimeout(resolve, ms + 750);
-      child.on('error', () => resolve());
-      child.stdin.end(JSON.stringify(input));
-    });
-  }
-
   it.each(agents)('%s keeps essentials when git hangs and the hook is killed', async agent => {
     await initRepo();
     // Every git call hangs, including root discovery. Bounding git OUTPUT does
     // not bound its RUNTIME, so essentials must land before any git runs.
-    await writeFile(join(bin, 'git'), '#!/bin/bash\nsleep 30\n', { mode: 0o755 });
-    await runAndKill(agent, { reason: 'logout', transcript_path: '/tmp/hang.jsonl' }, 2_000);
+    await writeFile(join(bin, 'git'), `#!/bin/bash\n: > ${quote(join(project, 'git-entered'))}\nsleep 30\n`, { mode: 0o755 });
+    const file = fileURLToPath(new URL(`../../src/templates/${agent}/hooks/session-end-capture.sh`, import.meta.url));
+    await runAndKill([shellPath(file)], project, { reason: 'logout', transcript_path: '/tmp/hang.jsonl' });
+    expect(await readFile(join(project, 'git-entered'), 'utf8')).toBe('');
     const files = await autosaves();
     expect(files).toHaveLength(1);
     const body = await readFile(join(sessions, files[0]), 'utf8');
@@ -369,26 +388,14 @@ describe('session-end registered command', () => {
     expect(command).toContain('session-end-capture.sh');
 
     // Every git invocation hangs — including any the launcher itself performs.
-    await writeFile(join(bin, 'git'), '#!/bin/bash\nsleep 30\n', { mode: 0o755 });
+    await writeFile(join(bin, 'git'), `#!/bin/bash\n: > ${quote(join(project, 'git-entered'))}\nsleep 30\n`, { mode: 0o755 });
     // Run from a nested subdirectory: CWD is NOT guaranteed to be the repo root,
     // and a subdirectory fallback that shells out to git reintroduces the hang.
     const nested = join(project, 'src', 'deep', 'nested');
     await mkdir(nested, { recursive: true });
-    await new Promise<void>(resolve => {
-      const child = spawn(bash, ['-c', command], {
-        cwd: nested, env, detached: process.platform !== 'win32',
-      });
-      setTimeout(() => {
-        try {
-          if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
-          else child.kill('SIGKILL');
-        } catch { /* already gone */ }
-      }, 2_000);
-      setTimeout(resolve, 2_750);
-      child.on('error', () => resolve());
-      child.stdin.end(JSON.stringify({ reason: 'logout', transcript_path: '/tmp/launch.jsonl' }));
-    });
+    await runAndKill(['-c', command], nested, { reason: 'logout', transcript_path: '/tmp/launch.jsonl' });
 
+    expect(await readFile(join(project, 'git-entered'), 'utf8')).toBe('');
     const files = (await readdir(sessions)).filter(n => n.endsWith('-sessionend-autosave.md'));
     expect(files).toHaveLength(1);
     const body = await readFile(join(sessions, files[0]), 'utf8');
