@@ -33,6 +33,12 @@ jobs:
           cache: 'npm'
           cache-dependency-path: packages/cli/package-lock.json
 
+      # Shell hooks must be LF on every platform. Windows runners check out with
+      # core.autocrlf=true, so without .gitattributes these arrive as CRLF and
+      # bash mis-parses them. i/lf w/lf is the expected state everywhere.
+      - name: Report line endings of shipped hook scripts
+        run: git ls-files --eol packages/cli/src/templates/*/hooks/*.sh
+
       - name: Install dependencies
         working-directory: packages/cli
         run: npm ci

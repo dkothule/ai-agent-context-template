@@ -116,10 +116,22 @@ esac
       if ((await readdir(sync)).length === 2) break;
       await new Promise(resolve => setTimeout(resolve, 5));
     }
-    expect((await readdir(sync)).sort()).toEqual(['a', 'b']);
+    const arrived = (await readdir(sync)).sort();
+    if (arrived.length !== 2) {
+      // Both hooks should be parked inside the stubbed `date`. If they never got
+      // there, surface why rather than asserting on an empty directory: release
+      // the gate, collect exit status and stderr, and report them.
+      await writeFile(join(sync, 'go'), '');
+      const failed = await Promise.all(calls);
+      const detail = failed
+        .map((r, i) => `[${['a', 'b'][i]}] code=${r.code} stderr=${JSON.stringify(r.stderr)} stdout=${JSON.stringify(r.stdout)}`)
+        .join('\n');
+      expect.fail(`stub date never reached +%H%M%S (sync=${JSON.stringify(arrived)})\n${detail}`);
+    }
+    expect(arrived).toEqual(['a', 'b']);
     await writeFile(join(sync, 'go'), '');
     const results = await Promise.all(calls);
-    expect(results.map(result => result.code)).toEqual([0, 0]);
+    expect(results.map(r => `${r.code} ${r.stderr}`)).toEqual(['0 ', '0 ']);
     const files = (await readdir(sessions)).sort();
     expect(files).toEqual(['2026-09-08-123456-2-precompact-autosave.md', '2026-09-08-123456-precompact-autosave.md']);
     const contents = await Promise.all(files.map(file => readFile(join(sessions, file), 'utf8')));
@@ -143,8 +155,10 @@ esac
     } else await chmod(sessions, 0o555);
     try {
       const result = await run(agent, 'pre-compact.sh');
-      expect(result.code).not.toBe(0);
-      expect(result.stderr).toContain('cannot create autosave');
+      const detail = `code=${result.code} stderr=${JSON.stringify(result.stderr)} `
+        + `stdout=${JSON.stringify(result.stdout)} sessions=${JSON.stringify(await readdir(sessions))}`;
+      expect(result.code, `expected a nonzero exit; ${detail}`).not.toBe(0);
+      expect(result.stderr, `expected the allocation error; ${detail}`).toContain('cannot create autosave');
       expect(await readFile(existing, 'utf8')).toBe('Keep me');
       expect(await readdir(sessions)).toEqual(['old-precompact-autosave.md']);
     } finally { await chmod(sessions, 0o755); }
