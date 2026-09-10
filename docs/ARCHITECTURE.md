@@ -46,7 +46,7 @@ flowchart TB
 
 - **One shared directory**, not per-agent configs. `.ai-context/` is the authoritative state.
 - **Thin adapters**. Agent-specific files contain pointers, not content. Keeps context windows clean.
-- **Hooks are invisible glue**. Claude Code, Cursor, and Codex hooks fire automatically to preserve context on compaction; users don't invoke them.
+- **Hooks are invisible glue**. Claude Code, Cursor, and Codex hooks fire automatically to preserve context at both points it is otherwise lost — compaction and session end; users don't invoke them.
 - **The CLI is orthogonal**. Agents work without the CLI once installed. The CLI is only for install, maintenance (drift, compact), and removal.
 
 ---
@@ -102,8 +102,8 @@ sequenceDiagram
   rect rgb(235, 245, 255)
     note over Agent,Ctx: Session start — tiered reads (always)
     Agent->>Ctx: read project.overview.md
-    Agent->>Ctx: read project.changelog.md
-    Agent->>Ctx: read latest sessions/*.md<br/>(excluding _archive/ and autosaves)
+    Agent->>Ctx: read project.tasks.md
+    Agent->>Ctx: read recent sessions/*.md<br/>(exclude _archive/ and _template.md, bounded selection)
   end
 
   User->>Agent: task (code / refactor / review)
@@ -111,6 +111,7 @@ sequenceDiagram
   rect rgb(255, 245, 230)
     note over Agent,Ctx: On-demand reads — based on task type
     Agent->>Ctx: standards/project.rules.{base,}.md<br/>(when writing code)
+    Agent->>Ctx: project.changelog.md<br/>(for release/history context)
     Agent->>Ctx: project.tasks.md + plans/<br/>(when planning non-trivial work)
     Agent->>Ctx: project.structure.md<br/>(when navigating the tree)
   end
@@ -130,7 +131,7 @@ sequenceDiagram
 
 ### Three project files, three time horizons
 
-The "Always-read" list includes `project.overview.md` and `project.changelog.md` but **not** `project.tasks.md` or `project.backlog.md`. That's deliberate — each file serves a different time horizon:
+The always-read list includes `project.overview.md`, `project.tasks.md`, and recent session logs. The changelog is read for release/history context; the backlog is consulted when grooming future work. Each file serves a different time horizon:
 
 | File | Horizon | What it holds | Update cadence |
 |---|---|---|---|
@@ -140,19 +141,13 @@ The "Always-read" list includes `project.overview.md` and `project.changelog.md`
 
 The lifecycle of an idea flows in one direction: `backlog.md` → (when work begins) `tasks.md` → (when done) possibly `changelog.md` under a version heading.
 
-For session-start orientation the tool picks `changelog.md` + `latest sessions/*.md` rather than `tasks.md` because:
+Session-start orientation combines overview (what this project is), tasks (active, blocked, and next work), and recent sessions (decisions and handoffs). The changelog provides shipped history when the task needs it. Keep task status current so the next agent can distinguish pending work from completed work.
 
-- **`changelog.md` is a stable anchor.** It describes what the project *is* at this moment — which features shipped, which fixes landed. Entries don't change after they're written, so it never misleads.
-- **`tasks.md` is volatile.** A stale "In Progress" marker can give the agent a wrong picture of what's actually happening. It's authoritative when you're planning, not when you're orienting.
-- **The latest session log is where the "right now" view lives.** Its `Next Steps` section is typically the freshest snapshot of active work — written minutes before the previous session ended, by the agent that was doing the work.
+### Bounded selection of recent session logs
 
-So the session-start triad covers three horizons without needing to read every file: overview (what this project is) + changelog (what has shipped) + latest session (what was just happening). `tasks.md` and `backlog.md` move to the on-demand tier and are read when the user's request is explicitly about planning or queueing work.
+Start with the newest filename date in `sessions/`, excluding `_archive/` and `_template.md`. For same-date logs, order by the `time:` frontmatter field, falling back to filename order where it is absent. Scan other same-date `# Session:` headings and read related topics. Follow earlier-session references in "Next Steps" or "Notes For Next Agent" when continuing work. Read at most three logs unless those continuation references require more.
 
-### "Latest file in sessions/" — it's literally one file
-
-The adapter rule says "latest file in `sessions/` (excluding `_archive/`)" — emphasis on **file**, singular. Agents never scan the whole sessions folder at session start; they pick the single most-recently-modified non-archive, non-autosave log. For a mature project with 100+ session files, scanning all of them would blow out the context window.
-
-This is why `ai-context compact` exists: it archives old sessions into `sessions/_archive/YYYY-MM-rollup.md` so the set of candidates for "latest" stays small and fresh. The `_archive/` folder's README tells agents not to read it at session start (and the `sessions/` glob excludes it explicitly). So the always-read load stays bounded: one overview + one changelog + one session log, no matter how big the project grows.
+This selection uses the documented date/time and relevance rules, not filesystem modification time or a strict one-file limit. `ai-context compact` archives old sessions into `sessions/_archive/YYYY-MM-rollup.md` to keep the active set manageable. Pending autosaves are separately surfaced by the session-start hook for curation.
 
 ### Which writebacks are mandatory
 
@@ -162,7 +157,9 @@ A new session log and updated task status happen every session. `project.decisio
 
 ## Context-preservation flow (Claude Code hooks)
 
-Claude Code's context window compacts when it fills up — either automatically near the token limit, or manually via `/compact`. Compaction is lossy by nature: the agent receives a summary, not the full transcript. `ai-context` installs two hooks that turn compaction into a safe, automatic checkpoint.
+Context is lost at two points: when the window compacts, and when a session ends. A hook covers each.
+
+Claude Code's context window compacts when it fills up — either automatically near the token limit, or manually via `/compact`. Compaction is lossy by nature: the agent receives a summary, not the full transcript. `ai-context` installs three hooks: two that turn compaction into a safe checkpoint, and one that captures state when a session ends without a log.
 
 ```mermaid
 sequenceDiagram
@@ -177,7 +174,7 @@ sequenceDiagram
   rect rgb(255, 240, 220)
     note over Claude,PC: PreCompact hook fires
     Claude->>PC: spawn with JSON on stdin<br/>(transcript_path, trigger)
-    PC->>FS: write YYYY-MM-DD-HHMM-<br/>precompact-autosave.md<br/>+ transcript excerpt via jq
+    PC->>FS: write YYYY-MM-DD-HHMMSS[-N]-<br/>precompact-autosave.md<br/>+ transcript excerpt via jq
     PC-->>Claude: exit 0 (never blocks)
   end
 
@@ -186,7 +183,7 @@ sequenceDiagram
   rect rgb(220, 240, 255)
     note over Claude,PCR: SessionStart(compact) hook fires
     Claude->>PCR: spawn on fresh post-compact session
-    PCR->>FS: glob for *-precompact-autosave.md
+    PCR->>FS: glob for *-autosave.md<br/>(pre-compact and session-end)
     PCR-->>Claude: emit additionalContext<br/>"autosave exists — curate it"
   end
 
@@ -200,11 +197,37 @@ sequenceDiagram
   end
 ```
 
+### Session-end capture
+
+Compaction is not the only way context is lost — a session that simply ends leaves nothing behind. `SessionEnd` (Claude), `sessionEnd` (Cursor) and `SessionEnd` (Codex) fire once per session and **cannot inject context**; all three vendors discard their output. So this hook does not ask the agent to write a log, it writes the breadcrumb itself, which needs no delivery channel.
+
+```mermaid
+sequenceDiagram
+  participant Agent as Agent (any of 3)
+  participant SE as session-end-capture.sh
+  participant FS as .ai-context/<br/>sessions/
+
+  Agent->>SE: session ends (any exit reason)
+  SE->>FS: today's curated log present?
+  alt log exists
+    SE-->>Agent: exit 0, write nothing
+  else no log
+    SE->>FS: reserve filename atomically
+    SE->>FS: write essentials first<br/>(reason, time, transcript pointer)
+    SE->>FS: append git detail<br/>(branch, tree, diffstat, commits)
+    SE-->>Agent: exit 0
+  end
+```
+
+Two constraints shape it. Session-end budgets are the tightest in the system — Codex caps at 1s default / 3s max, Claude shares a 1.5s budget — and git has no inherent runtime bound. So essentials are written *before* any git call, and root discovery uses shell builtins only, in both the script and the registered launcher command. A hook killed at the ceiling still leaves a usable breadcrumb rather than an empty file.
+
 **Design decisions:**
 
 - **Both manual and auto triggers run the same path.** An earlier design blocked manual `/compact` to force a session log first; that friction wasn't worth it. The autosave captures context regardless of trigger.
-- **Post-compaction reminder uses the best channel each agent exposes.** Claude uses `SessionStart(compact)` with `additionalContext`; Cursor uses `sessionStart`; Codex uses `PostCompact` and also keeps `SessionStart` as a leftover-autosave safety net.
+- **Session-start reminders use configured context channels.** Claude uses `SessionStart(startup|resume|compact)` with `additionalContext`; Cursor uses `sessionStart` with `additional_context`; Codex uses `SessionStart(startup|resume)` with `additionalContext` and retains `PostCompact` autosave curation. A missing daily log prompts “write one before you finish.” Configuration/output tests establish the emitted fields, not live vendor delivery.
+- **Autosave names are reserved atomically.** Seconds plus a collision suffix prevent overwrite. Discovery uses modification time, then descending filename order for ties, via the existing Node runtime.
 - **Autosaves preserve a breadcrumb, not the durable record.** The autosave stores a `local_transcript_ref` pointer to the local transcript JSONL and, when possible, a recent-turn excerpt. The post-compact session should copy `source_autosave` and `local_transcript_ref` into the curated session log before deleting the autosave, so exact prior discussion remains recoverable locally if the compacted summary missed a critical detail. Older autosaves may use the legacy field name `transcript_ref`; curators should normalize that to `local_transcript_ref`. Hooks write the path home-relative when possible, but because `local_transcript_ref` is still local/private, teams that commit or share session logs may redact it.
+- **Capture writes, reminders ask.** The two concerns run on different channels because only one of them can carry the message. Session start has a documented context channel, so the reminder lives there. Session end has none, so capture writes to disk instead. Cursor's `sessionEnd` does not fire for cloud agents, so capture does not run there; breadcrumbs record `is_background_agent` to make that visible.
 - **Graceful `jq` degradation.** If `jq` isn't installed, the autosave still writes a stub with a pointer to the transcript JSONL path. Context isn't lost even in minimal environments.
 
 ---

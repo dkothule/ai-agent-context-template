@@ -99,7 +99,7 @@ describe('uninstall', () => {
     expect(existsSync(join(tmpDir, '.cursor', 'user.json'))).toBe(true);
   });
 
-  it('removes Stop hook from settings.json during uninstall', async () => {
+  it('removes session-start hook from settings.json during uninstall', async () => {
     // Install with hooks
     await mkdir(join(tmpDir, '.claude'), { recursive: true });
     await writeFile(
@@ -111,14 +111,14 @@ describe('uninstall', () => {
     // Verify hook was merged
     const { readFile } = await import('fs/promises');
     const before = await readFile(join(tmpDir, '.claude', 'settings.json'), 'utf8');
-    expect(before).toContain('session-log-check.sh');
+    expect(before).toContain('context-reminder.sh');
 
     await runUninstall(tmpDir);
 
     // settings.json still exists but hook removed
     if (existsSync(join(tmpDir, '.claude', 'settings.json'))) {
       const after = await readFile(join(tmpDir, '.claude', 'settings.json'), 'utf8');
-      expect(after).not.toContain('session-log-check.sh');
+      expect(after).not.toContain('context-reminder.sh');
     }
   });
 

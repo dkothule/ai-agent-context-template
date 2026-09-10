@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # AI Context — Cursor preCompact hook
 # Fires before context compaction. Writes a best-effort autosave of the
-# transcript to .ai-context/sessions/YYYY-MM-DD-HHMM-precompact-autosave.md so
-# the working context survives compaction. Compaction always proceeds (exit 0)
+# transcript to .ai-context/sessions/YYYY-MM-DD-HHMMSS[-N]-precompact-autosave.md so
+# the working context survives compaction. Successful autosaves exit 0; write failures exit nonzero
 # — the sessionStart hook in the next session reminds the agent to curate the
 # autosave.
 #
@@ -39,8 +39,20 @@ fi
 [[ -d "$SESSIONS_DIR" ]] || exit 0
 
 date_str="$(date +%Y-%m-%d)"
-time_str="$(date +%H%M)"
-autosave="${SESSIONS_DIR}/${date_str}-${time_str}-precompact-autosave.md"
+time_str="$(date +%H%M%S)"
+autosave_base="${SESSIONS_DIR}/${date_str}-${time_str}"
+autosave="${autosave_base}-precompact-autosave.md"
+collision=1
+# Reserve the name atomically. Noclobber is scoped to this subshell so the
+# body can append below. Retry only existing names, never other write errors.
+while ! (set -C; : > "$autosave") 2>/dev/null; do
+  if [[ ! -e "$autosave" && ! -L "$autosave" ]]; then
+    printf 'AI Context: cannot create autosave: %s\n' "$autosave" >&2
+    exit 1
+  fi
+  collision=$((collision + 1))
+  autosave="${autosave_base}-${collision}-precompact-autosave.md"
+done
 
 {
   printf -- '---\n'
@@ -56,7 +68,7 @@ autosave="${SESSIONS_DIR}/${date_str}-${time_str}-precompact-autosave.md"
   printf 'this file in the next turn, write a curated session log using\n'
   printf '`.ai-context/sessions/_template.md`, then delete this autosave.\n\n'
   printf '## Transcript reference\n\nFull transcript (local JSONL): `%s`\n\n' "$local_transcript_ref"
-} > "$autosave"
+} >> "$autosave"
 
 if command -v jq >/dev/null 2>&1 && [[ -n "${transcript_path:-}" && -f "$transcript_path" ]]; then
   printf '## Recent turns\n\n' >> "$autosave"

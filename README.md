@@ -29,7 +29,7 @@ AI coding agents are getting better at writing code, but they still lose leverag
 |---|---|
 | 🧠 **Shared memory** | One context directory, read by Claude Code, Cursor, and Codex alike. |
 | 🔁 **Session continuity** | Session logs carry decisions, plans, and state across sessions. |
-| 🪝 **Survives compaction** | Per-agent hooks checkpoint the transcript before context is dropped, then prompt the next session to curate it. |
+| 🪝 **Compaction recovery** | Per-agent hooks save transcript breadcrumbs and request curation; recovery is best-effort. |
 | 🔍 **Drift detection** | `check-drift` audits your context against the real codebase and can auto-apply fixes by severity. |
 | 🗜️ **Session compaction** | `compact` rolls up stale logs so "read the latest session" stays useful after months of work. |
 | ⚙️ **One CLI, three agents** | `setup` / `check-drift` / `compact` run non-interactively through whichever agent CLI you configure. |
@@ -46,14 +46,14 @@ OpenAI's [harness engineering post](https://openai.com/index/harness-engineering
 - **One shared directory** (`.ai-context/`) that acts as the project context system of record.
 - **Thin adapter files** (`AGENTS.md`, `CLAUDE.md`, `.cursor/rules/…`) that act as tables of contents, not monoliths.
 - **Scoped context files** for overview, structure, standards, tasks, decisions, changelog, plans, and sessions.
-- **Session hooks** that remind agents to log work and preserve transcript breadcrumbs before compaction drops context.
+- **Session hooks** that emit log reminders and attempt to save transcript breadcrumbs before compaction drops context.
 - **Maintenance commands** that mechanically check drift, compact old sessions, and keep shared context usable over time.
 
 ### Why not just maintain a `CLAUDE.md` by hand?
 
 - **A single adapter file locks you to one agent.** `ai-context` keeps Claude, Cursor, and Codex reading the *same* source through thin per-agent adapters — switch tools without rewriting anything.
 - **Hand-maintained docs go stale silently.** `check-drift` finds the drift and patches it, so your context tracks the code instead of slowly lying about it.
-- **Flat instructions don't survive compaction.** The hooks checkpoint and restore transcript context automatically — a static file can't.
+- **Compaction recovery needs a handoff.** Hooks attempt to save transcript breadcrumbs and request curation into a durable session log; recovery is best-effort.
 - **It scales past one repo and one person.** Session logs, decision records, and shared standards give the next contributor — human or agent — a real handoff, not a wall of instructions.
 
 ---
@@ -144,10 +144,10 @@ your-project/
 ├── AGENTS.md                    # thin wrapper → points to .ai-context/
 ├── .cursor/
 │   ├── rules/main.mdc           # Cursor adapter
-│   ├── hooks/                   # session-management hooks (preCompact, sessionEnd, sessionStart)
+│   ├── hooks/                   # session-management hooks (preCompact, sessionStart, sessionEnd)
 │   └── hooks.json               # Cursor hook registrations
 ├── .codex/
-│   ├── hooks/                   # session-management hooks (Stop, PreCompact, PostCompact, SessionStart)
+│   ├── hooks/                   # session-management hooks (PreCompact, PostCompact, SessionStart, SessionEnd)
 │   ├── hooks.json               # Codex hook registrations
 │   └── config.toml              # enables `hooks` feature flag (required by Codex)
 ├── .claude/
@@ -164,16 +164,26 @@ your-project/
 
 On session start, every agent follows the same tiered reading protocol:
 
-**Always read:**
-1. `project.overview.md` — project state and objectives
-2. `project.changelog.md` — recent user-visible changes
-3. Latest file in `sessions/` (excluding `_archive/`) — last session's handoff
+All paths below are relative to `.ai-context/`.
 
-**Then read based on task:**
-- Writing code → `standards/project.rules.base.md` + `project.rules.md`
-- Planning non-trivial work → `project.tasks.md` + `plans/`
-- Continuing prior work → additional files in `sessions/`
-- Language/testing specifics → relevant files in `standards/`
+Always read:
+1. `project.overview.md` — what this project is
+2. `project.tasks.md` — what is in flight, blocked, next
+3. Session logs in `sessions/` — never `_archive/`, never `_template.md`:
+   a. Newest by filename date. If several share that date, order by the
+      `time:` frontmatter field; where absent, fall back to filename order.
+   b. Scan the `# Session:` heading of the other same-date logs and read any
+      whose topic relates to the current task.
+   c. If that log's "Next Steps" or "Notes For Next Agent" points at earlier
+      work you are continuing, follow the reference.
+   Read at most 3 logs unless continuation references in (c) require more.
+
+Then read based on task:
+- Writing/modifying code → `standards/project.rules.base.md`, `standards/project.rules.md`
+- Release/history context → `project.changelog.md`
+- Understanding layout → `project.structure.md`
+- Planning non-trivial work → `project.tasks.md`, `plans/`
+- Language/testing → files in `standards/`
 
 At session end, the agent writes a session log, updates `project.tasks.md`, logs decisions to `project.decisions.md`, and notes user-visible changes in `project.changelog.md`.
 
@@ -183,29 +193,36 @@ At session end, the agent writes a session log, updates `project.tasks.md`, logs
 
 Session-management hooks are installed for Claude Code, Cursor, and Codex. Coverage by agent:
 
-| Agent | Session-end log reminder | Pre-compact autosave | Post-compact reminder |
-|---|---|---|---|
-| **Claude Code** (`.claude/settings.json`) | ✅ `Stop` | ✅ `PreCompact` | ✅ `SessionStart(compact)` |
-| **Cursor** (`.cursor/hooks.json`) | ✅ `sessionEnd` | ✅ `preCompact` | ✅ `sessionStart` (`additional_context`) |
-| **Codex** (`.codex/hooks.json`) | ✅ `Stop` | ✅ `PreCompact` | ✅ `PostCompact` + `SessionStart` |
+| Agent | Session-start log reminder | Pre-compact autosave | Session-end capture | Post-compact reminder |
+|---|---|---|---|---|
+| **Claude Code** (`.claude/settings.json`) | `SessionStart` → `additionalContext` | ✅ `PreCompact` | ✅ `SessionEnd` | ✅ `SessionStart(compact)` |
+| **Cursor** (`.cursor/hooks.json`) | `sessionStart` → `additional_context` | ✅ `preCompact` | ✅ `sessionEnd` (not on cloud agents) | ✅ `sessionStart` (`additional_context`) |
+| **Codex** (`.codex/hooks.json`) | `SessionStart` → `additionalContext` | ✅ `PreCompact` | ✅ `SessionEnd` | ✅ `PostCompact` + `SessionStart` |
 
 What each hook does:
 
-- **Session-end log reminder** — reminds the agent to write a session log if today's log is missing. Advisory only (never blocks).
-- **Pre-compact autosave** — writes `sessions/YYYY-MM-DD-HHMM-precompact-autosave.md` before compaction. The autosave includes a `local_transcript_ref` pointer to the local agent transcript JSONL and, when possible, a short recent-turn excerpt, so critical context remains recoverable even if the compacted summary omits it.
+- **Session-start log reminder** — when no log exists for today, emits “write one before you finish” through the documented context channel. Configuration and script-output tests verify the fields; live delivery has not been verified for this release. The reminder is advisory and does not enforce logging.
+- **Pre-compact autosave** — writes `sessions/YYYY-MM-DD-HHMMSS[-N]-precompact-autosave.md` before compaction. Atomic filename reservation adds `-2`, `-3`, etc. before the suffix on collisions. The autosave includes a `local_transcript_ref` pointer to the local agent transcript JSONL and, when possible, a short recent-turn excerpt, to support best-effort recovery when the compacted summary omits critical context.
+- **Session-end capture** — when a session ends with no log for today, writes `sessions/YYYY-MM-DD-HHMMSS[-N]-sessionend-autosave.md` recording the end reason, branch, working tree, diffstat, recent commits, and the transcript pointer. It writes the breadcrumb directly rather than asking the agent, so it does not depend on any hook-output channel. Nothing is written when a curated log for today already exists. Fires on every documented exit reason, `resume` included — a session resumed in a *different* agent is exactly the handoff this protects.
 - **Post-compact reminder** — in the fresh session after compaction, surfaces the autosave so the agent curates it into a proper session log. The session log should preserve `source_autosave` and the autosave's `local_transcript_ref` when present, then delete the autosave. Older autosaves may use the legacy name `transcript_ref`; copy it into `local_transcript_ref` during curation.
 
-Result: with Claude Code, Cursor, or Codex, compaction writes a recoverable checkpoint before context is dropped and then reminds the next session to curate it.
+The session-start hook surfaces autosaves from both sources, names the newest, says which kind it came from, and reports how many are pending so earlier breadcrumbs are not stranded.
+
+**Cursor coverage limit:** Cursor's `sessionEnd` is tied to the IDE session and does not fire for cloud agents, so session-end capture does not run there. Breadcrumbs record `is_background_agent` so you can tell. Compaction autosaves are unaffected.
+
+Discovery selects the most recently modified autosave, including legacy `HHMM` names; equal modification times use descending filename order independent of locale. Reminder and capture scripts use the existing Node 18+ runtime to read timestamps and parse or encode JSON. If Node is somehow unavailable, session-end capture still writes a minimal breadcrumb using shell builtins rather than leaving an empty file. If no reminder is needed, the scripts exit successfully without output.
+
+Recovery is best-effort: it depends on hooks running, the local transcript remaining available, and the agent reviewing and curating the autosave. Optional `jq` enables the recent-turn excerpt; without it, hooks still write an autosave with the `local_transcript_ref` pointer but no excerpt. Installing `jq` does not guarantee recovery.
 
 The local transcript reference is a fallback, not the durable memory itself. It helps the same local agent recover exact prior discussion if something important was lost during compaction; the curated session log remains the portable handoff future agents should read first. Hooks write the path home-relative when possible (`~/.codex/...` instead of `/Users/name/...`), but if you commit or share session logs, still treat `local_transcript_ref` as local/private and redact it if needed.
 
-All hooks are installed automatically by `ai-context init` for the agents you select. Existing user-owned hooks in `hooks.json` / `settings.json` are preserved — the installer merges additively.
+All hooks are installed automatically by `ai-context init` for the agents you select. Existing user-owned hooks in `hooks.json` / `settings.json` are preserved — the installer preserves user handlers while replacing its own registrations and removing retired `Stop`/`sessionEnd` handlers.
 
 > [!IMPORTANT]
 > **Codex requires a one-time trust step, or its hooks silently do nothing.**
 > Codex loads `.codex/hooks.json` only after you explicitly trust each hook — installing the files is not enough. After `ai-context init` (or any time the Codex hooks change), trust them one of two ways:
 >
-> - **Codex CLI** — open Codex in the project and run `/hooks`, then approve the AI Context entries (`PreCompact`, `PostCompact`, `Stop`, `SessionStart`).
+> - **Codex CLI** — open Codex in the project and run `/hooks`, then approve the AI Context entries (`PreCompact`, `PostCompact`, `SessionStart`, `SessionEnd`).
 > - **Codex desktop app** — go to **Settings → Hooks** and trust the project-level hooks.
 >
 > Until you do this, Codex's autosave-on-compaction and session-log reminders will **not** run. Trust is stored per hook hash in `~/.codex/config.toml`, so re-trust after the hooks change. If a Codex session was already open when the hooks were added, **restart the app/session (or re-open the project)** before trusting them.
@@ -308,7 +325,7 @@ source_count: 4
 # Archived sessions 2026-02-27 → 2026-03-03
 
 ## Decisions carried forward
-- ADRs 007–011 added for agent architecture; source: 2026-02-27-bootstrap-ai-context.md
+- ADRs 007–011 added for agent architecture; source: 2026-02-27-agent-architecture.md
 - ...
 
 ## Open threads at end of range
@@ -318,7 +335,7 @@ source_count: 4
 - knowledge/: runtime content lives under live/, staging area under staging/
 
 ## Archived sessions
-- 2026-02-27-bootstrap-ai-context.md — one-line summary
+- 2026-02-27-agent-architecture.md — one-line summary
 - ...
 ```
 
@@ -448,9 +465,9 @@ Many teams keep session logs local (personal) while committing the rest of `.ai-
 
 | Agent | Adapter | Hooks | CLI support for `setup`/`check-drift`/`compact` |
 |---|---|---|---|
-| **Claude Code** | `CLAUDE.md` + `.claude/hooks/` + `settings.json` | Stop, PreCompact, SessionStart(compact) | ✅ `claude -p` (primary) |
-| **Cursor** | `.cursor/rules/main.mdc` | preCompact, sessionEnd, sessionStart (`.cursor/hooks.json`) | ✅ `agent --print` (falls back to `cursor-agent` for older installs) |
-| **Codex / OpenAI agents** | `AGENTS.md` + `.codex/hooks/` | Stop, PreCompact, PostCompact, SessionStart (`.codex/hooks.json`) | ✅ `codex exec` |
+| **Claude Code** | `CLAUDE.md` + `.claude/hooks/` + `settings.json` | PreCompact, SessionStart(startup/resume/compact), SessionEnd | ✅ `claude -p` (primary) |
+| **Cursor** | `.cursor/rules/main.mdc` | preCompact, sessionStart, sessionEnd (IDE only; `.cursor/hooks.json`) | ✅ `agent --print` (falls back to `cursor-agent` for older installs) |
+| **Codex / OpenAI agents** | `AGENTS.md` + `.codex/hooks/` | PreCompact, PostCompact, SessionStart, SessionEnd (`.codex/hooks.json`) | ✅ `codex exec` |
 | **GitHub Copilot** | _(not shipped — incompatible with Copilot's auto-review + can't resolve relative links; backlog: generate a self-contained instructions file)_ | N/A | N/A |
 
 All agents read `.ai-context/`. The CLI column affects whether `ai-context setup/check-drift/compact` can execute the LLM prompt directly vs. copy it to your clipboard for manual paste.
@@ -491,8 +508,8 @@ Short version:
 - **Single source of truth**: `.ai-context/` holds all governance. Adapters are thin pointers.
 - **Base vs. local standards**: `project.rules.base.md` ships with the tool (upgraded automatically); `project.rules.md` is project-owned (never overwritten).
 - **Ownership-based restore**: on upgrade, tool-owned files are replaced, project-owned files are restored from backup by path pattern. Custom files you add are preserved.
-- **Session logs are mandatory**: reminded by Claude's `Stop` hook, Cursor's `sessionEnd` hook, and Codex's `Stop` hook; instructed by the adapter files; and built into the Session Start reading habit.
-- **Hooks, not humans, preserve compaction context**: Claude Code's `PreCompact`, Cursor's `preCompact`, and Codex's `PreCompact` hooks autosave the transcript before compaction; the corresponding post-compact/session-start hooks remind the next session to curate the autosave.
+- **Session logs are mandatory**: adapter instructions require them; session-start hooks emit forward-looking advisory reminders through each agent’s context channel, verified here at configuration level.
+- **Best-effort compaction recovery**: pre-compact hooks attempt to save a local transcript pointer and optional excerpt; post-compact/session-start hooks request curation. The curated session log provides the durable handoff.
 
 ### Maintainer note: hook source of truth
 
@@ -511,12 +528,17 @@ Codex also requires an explicit hook review step after project-level hooks are a
 
 Ideas on the near-term roadmap. Directions, not commitments — open an issue if one would unblock you.
 
-- **Skills** — install and manage skills.
-- **Windows-native hooks** — drop the Git Bash / WSL dependency with PowerShell or Node equivalents for the bash hooks.
-- **Self-contained GitHub Copilot adapter** — a generator command that builds a flat `.github/copilot-instructions.md` by synthesizing `.ai-context/` content, since Copilot can't resolve relative links the way CLAUDE.md / AGENTS.md can.
-- **Hook smoke automation** — add live hook-trigger smoke tests for Cursor/Codex when their CLIs expose stable hook test commands.
-- **Plugin system** — register custom static drift checks or additional "Read First" files without forking the tool.
-- **`ai-context export`** — dump a flattened snapshot of `.ai-context/` (markdown bundle + manifest) for offline sharing, incident tickets, or attaching to bug reports.
+1. **Simpler context loading and evaluated prompts** — keep startup guidance focused and evaluate prompts against representative repositories.
+2. **Task handoffs and verification checkpoints** — make current state, next steps, and validation evidence easier to carry between agents.
+3. **Portable workflows and vendor plugins** — develop reusable skills and workflows with tested vendor packaging.
+4. **Hook reliability and compatibility** — improve autosave and reminder reliability, including live hook smoke automation when stable test commands are available. Review the Node minimum separately; no runtime-floor change is committed to a release.
+
+**Deferred:**
+
+- **Windows-native hooks** — PowerShell or Node equivalents for the bash hooks.
+- **Self-contained GitHub Copilot adapter** — generate a flat instruction file from project context.
+- **`ai-context export`** — a flattened context snapshot for offline sharing, incident tickets, or bug reports.
+- **Custom plugin framework** — register custom static drift checks or additional reading-list files without forking the tool.
 
 ---
 

@@ -23,7 +23,7 @@ beforeEach(async () => {
   await mkdir(join(codexDir, 'hooks'), { recursive: true });
   await writeFile(join(codexDir, 'hooks', 'pre-compact.sh'), '#!/bin/bash\nexit 0\n');
   await writeFile(join(codexDir, 'hooks', 'session-log-check.sh'), '#!/bin/bash\nexit 0\n');
-  await writeFile(join(codexDir, 'hooks', 'post-compact-reminder.sh'), '#!/bin/bash\nexit 0\n');
+  await writeFile(join(codexDir, 'hooks', 'context-reminder.sh'), '#!/bin/bash\nexit 0\n');
   await mkdir(templateCodexDir, { recursive: true });
 });
 
@@ -40,7 +40,7 @@ describe('installCodexHooks — fresh install (Claude-style nested schema)', () 
   it('writes a fresh hooks.json with compaction + session events using the documented schema', async () => {
     const result = await installCodexHooks(templateCodexDir, tmpDir, false);
     expect(result.configMerged).toBe(true);
-    expect(result.eventsMerged.sort()).toEqual(['PostCompact', 'PreCompact', 'SessionStart', 'Stop']);
+    expect(result.eventsMerged.sort()).toEqual(['PostCompact', 'PreCompact', 'SessionEnd', 'SessionStart']);
     expect(result.featureFlagEnsured).toBe(true);
 
     const config = JSON.parse(await readFile(join(codexDir, 'hooks.json'), 'utf8'));
@@ -53,24 +53,16 @@ describe('installCodexHooks — fresh install (Claude-style nested schema)', () 
     expect(preCompactEntry!.hooks[0].type).toBe('command');
     expect(preCompactEntry!.hooks[0].command).toContain('git rev-parse --show-toplevel');
 
-    const postCompactEntry = findEntry(config.hooks.PostCompact, 'post-compact-reminder.sh');
+    const postCompactEntry = findEntry(config.hooks.PostCompact, 'context-reminder.sh');
     expect(postCompactEntry).toBeDefined();
     expect(postCompactEntry!.matcher).toBe('manual|auto');
     expect(postCompactEntry!.hooks[0].type).toBe('command');
     expect(postCompactEntry!.hooks[0].command).toContain('git rev-parse --show-toplevel');
 
-    // Stop event: no matcher, hooks[] with type:'command'
-    const stopEntry = findEntry(config.hooks.Stop, 'session-log-check.sh');
-    expect(stopEntry).toBeDefined();
-    expect(stopEntry!.hooks[0].type).toBe('command');
-    // Per Codex docs, hook commands should resolve via the git root, not via
-    // a relative path, because Codex may be started from a subdirectory.
-    expect(stopEntry!.hooks[0].command).toContain('git rev-parse --show-toplevel');
-    expect(stopEntry!.hooks[0].command).toContain('.codex/hooks/session-log-check.sh');
-    expect(stopEntry!.hooks[0].timeout).toBe(30);
+    expect(config.hooks.Stop).toBeUndefined();
 
     // SessionStart event: matcher 'startup|resume', hooks[] with type:'command'
-    const sessionStartEntry = findEntry(config.hooks.SessionStart, 'post-compact-reminder.sh');
+    const sessionStartEntry = findEntry(config.hooks.SessionStart, 'context-reminder.sh');
     expect(sessionStartEntry).toBeDefined();
     expect(sessionStartEntry!.matcher).toBe('startup|resume');
     expect(sessionStartEntry!.hooks[0].type).toBe('command');
@@ -122,13 +114,13 @@ describe('installCodexHooks — upgrade / idempotency', () => {
     const merged = JSON.parse(await readFile(join(codexDir, 'hooks.json'), 'utf8'));
     // User-owned event preserved verbatim
     expect(merged.hooks.UserPromptSubmit).toEqual(userOwned.hooks.UserPromptSubmit);
-    // Stop now has user + ours
-    expect(merged.hooks.Stop).toHaveLength(2);
+    // Stop retains only user hooks
+    expect(merged.hooks.Stop).toHaveLength(1);
     expect(findEntry(merged.hooks.Stop, 'my-stop.sh')).toBeDefined();
-    expect(findEntry(merged.hooks.Stop, 'session-log-check.sh')).toBeDefined();
+    expect(findEntry(merged.hooks.Stop, 'session-log-check.sh')).toBeUndefined();
     expect(findEntry(merged.hooks.PreCompact, 'pre-compact.sh')).toBeDefined();
-    expect(findEntry(merged.hooks.PostCompact, 'post-compact-reminder.sh')).toBeDefined();
-    expect(findEntry(merged.hooks.SessionStart, 'post-compact-reminder.sh')).toBeDefined();
+    expect(findEntry(merged.hooks.PostCompact, 'context-reminder.sh')).toBeDefined();
+    expect(findEntry(merged.hooks.SessionStart, 'context-reminder.sh')).toBeDefined();
   });
 
   it('dry-run does not write anything', async () => {
@@ -491,7 +483,7 @@ describe('removeCodexHooks', () => {
         SessionStart: [
           {
             matcher: 'startup|resume',
-            hooks: [{ type: 'command', command: 'bash .codex/hooks/post-compact-reminder.sh' }],
+            hooks: [{ type: 'command', command: 'bash .codex/hooks/context-reminder.sh' }],
           },
         ],
       },

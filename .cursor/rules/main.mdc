@@ -10,17 +10,26 @@ Use `.ai-context/` as the single source of truth for project workflow, standards
 
 ## Session Start
 
-Always read for orientation:
-1. `.ai-context/project.overview.md`
-2. `.ai-context/project.changelog.md`
-3. Latest file in `.ai-context/sessions/` (**excluding `_archive/`**)
+All paths below are relative to `.ai-context/`.
+
+Always read:
+1. `project.overview.md` — what this project is
+2. `project.tasks.md` — what is in flight, blocked, next
+3. Session logs in `sessions/` — never `_archive/`, never `_template.md`:
+   a. Newest by filename date. If several share that date, order by the
+      `time:` frontmatter field; where absent, fall back to filename order.
+   b. Scan the `# Session:` heading of the other same-date logs and read any
+      whose topic relates to the current task.
+   c. If that log's "Next Steps" or "Notes For Next Agent" points at earlier
+      work you are continuing, follow the reference.
+   Read at most 3 logs unless continuation references in (c) require more.
 
 Then read based on task:
-- **Writing/modifying code** → `standards/project.rules.base.md`, `project.rules.md`
-- **Planning non-trivial work** → `project.tasks.md`, `plans/`
-- **Understanding codebase layout** → `project.structure.md`
-- **Continuing prior work** → additional files in `sessions/`
-- **Language/testing specifics** → files in `standards/`
+- Writing/modifying code → `standards/project.rules.base.md`, `standards/project.rules.md`
+- Release/history context → `project.changelog.md`
+- Understanding layout → `project.structure.md`
+- Planning non-trivial work → `project.tasks.md`, `plans/`
+- Language/testing → files in `standards/`
 
 ## Planning
 
@@ -37,9 +46,8 @@ Before non-trivial work (multi-session, architectural change, external dependenc
 
 ## Hooks
 Cursor session hooks are configured in `.cursor/hooks.json`:
-- `preCompact` autosaves the working transcript to `.ai-context/sessions/YYYY-MM-DD-HHMM-precompact-autosave.md` before compaction. After compaction, review the autosave, curate it into a proper session log, record the autosave filename as `source_autosave`, copy its `local_transcript_ref` if present, then delete the autosave. Treat `local_transcript_ref` as a local/private fallback pointer, not the durable handoff.
-- `sessionEnd` reminds you to write a session log if today's log is missing.
-- `sessionStart` surfaces any pending autosave for curation.
+- `preCompact` autosaves the working transcript to `.ai-context/sessions/YYYY-MM-DD-HHMMSS[-N]-precompact-autosave.md` before compaction. After compaction, review the autosave, curate it into a proper session log, record the autosave filename as `source_autosave`, copy its `local_transcript_ref` if present, then delete the autosave. Treat `local_transcript_ref` as a local/private fallback pointer, not the durable handoff.
+- `sessionStart` emits a forward-looking reminder to write a log before finishing if today's log is missing, alongside any autosave curation request, through `additional_context`. Configuration/output tests verify this channel; live delivery is not guaranteed.
 
 ## CLI integration
 `ai-context setup` / `compact` / `check-drift` auto-detect the Cursor `agent` CLI (with fallback to the legacy `cursor-agent` binary), Claude Code, or Codex for non-interactive execution. If no CLI is on PATH or authenticated, the prompt is copied to the clipboard — paste it into the Cursor Agent panel as a fallback.

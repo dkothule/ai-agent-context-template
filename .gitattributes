@@ -1,0 +1,12 @@
+# Normalize text files in the repository.
+* text=auto
+
+# Shell scripts must keep LF endings on every platform. They are executed by
+# bash (Git Bash on Windows), where CRLF breaks shebang resolution and leaves
+# stray \r inside variable values that end up in filenames. Without this rule
+# a Windows checkout with core.autocrlf=true silently converts them.
+*.sh text eol=lf
+
+# Hook payloads and fixtures parsed by those scripts, for the same reason.
+*.json text eol=lf
+*.mdc text eol=lf

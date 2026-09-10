@@ -1,17 +1,5 @@
 {
   "hooks": {
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/hooks/session-log-check.sh\"",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
     "PreCompact": [
       {
         "matcher": "manual",
@@ -19,7 +7,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/hooks/pre-compact.sh\"",
-            "timeout": 5000
+            "timeout": 30
           }
         ]
       },
@@ -29,19 +17,31 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/hooks/pre-compact.sh\"",
-            "timeout": 10000
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "clear|resume|logout|prompt_input_exit|other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'd=\"$PWD\"; while [ -n \"$d\" ] && [ ! -f \"$d/.claude/hooks/session-end-capture.sh\" ]; do d=\"${d%/*}\"; done; [ -n \"$d\" ] && exec bash \"$d/.claude/hooks/session-end-capture.sh\"; exit 0'",
+            "timeout": 5
           }
         ]
       }
     ],
     "SessionStart": [
       {
-        "matcher": "compact",
+        "matcher": "startup|resume|compact",
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/hooks/post-compact-reminder.sh\"",
-            "timeout": 5000
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}/.claude/hooks/context-reminder.sh\"",
+            "timeout": 10
           }
         ]
       }

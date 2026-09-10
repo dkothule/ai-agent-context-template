@@ -2,13 +2,19 @@
   "version": 1,
   "hooks": {
     "preCompact": [
-      { "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.cursor/hooks/pre-compact.sh\"" }
-    ],
-    "sessionEnd": [
-      { "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.cursor/hooks/session-log-check.sh\"" }
+      {
+        "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.cursor/hooks/pre-compact.sh\""
+      }
     ],
     "sessionStart": [
-      { "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.cursor/hooks/post-compact-reminder.sh\"" }
+      {
+        "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.cursor/hooks/context-reminder.sh\""
+      }
+    ],
+    "sessionEnd": [
+      {
+        "command": "bash -c 'd=\"$PWD\"; while [ -n \"$d\" ] && [ ! -f \"$d/.cursor/hooks/session-end-capture.sh\" ]; do d=\"${d%/*}\"; done; [ -n \"$d\" ] && exec bash \"$d/.cursor/hooks/session-end-capture.sh\"; exit 0'"
+      }
     ]
   }
 }

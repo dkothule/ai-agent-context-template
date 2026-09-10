@@ -12,6 +12,6 @@ export function printCodexHookTrustReminder(): void {
   log.warn('Codex hooks installed — trust them, or they will not run:');
   log.info(`  • Codex CLI:  run ${pc.bold('/hooks')} in this project and approve the AI Context entries`);
   log.info(`  • Codex app:  ${pc.bold('Settings → Hooks')} → trust the project-level hooks`);
-  log.info(pc.dim('  Until trusted, Codex skips PreCompact/PostCompact autosave + session-log reminders.'));
+  log.info(pc.dim('  Until trusted, Codex skips compaction autosaves, session-end capture, and session-start reminders.'));
   log.info(pc.dim('  If Codex was already open, restart it (or re-open the project) first.'));
 }

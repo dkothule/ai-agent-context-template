@@ -35,12 +35,26 @@ When asking for confirmation, state:
 3. rollback/mitigation plan if available.
 
 ## 5) Session Start (Required)
-Before coding, read:
-1. `.ai-context/project.overview.md`
-2. `.ai-context/project.tasks.md`
-3. `.ai-context/project.structure.md`
-4. Recent files in `.ai-context/sessions/`
-5. Relevant standards in `.ai-context/standards/`
+All paths below are relative to `.ai-context/`.
+
+Always read:
+1. `project.overview.md` — what this project is
+2. `project.tasks.md` — what is in flight, blocked, next
+3. Session logs in `sessions/` — never `_archive/`, never `_template.md`:
+   a. Newest by filename date. If several share that date, order by the
+      `time:` frontmatter field; where absent, fall back to filename order.
+   b. Scan the `# Session:` heading of the other same-date logs and read any
+      whose topic relates to the current task.
+   c. If that log's "Next Steps" or "Notes For Next Agent" points at earlier
+      work you are continuing, follow the reference.
+   Read at most 3 logs unless continuation references in (c) require more.
+
+Then read based on task:
+- Writing/modifying code → `standards/project.rules.base.md`, `standards/project.rules.md`
+- Release/history context → `project.changelog.md`
+- Understanding layout → `project.structure.md`
+- Planning non-trivial work → `project.tasks.md`, `plans/`
+- Language/testing → files in `standards/`
 
 ## 6) Working Loop
 1. Plan the smallest safe change that satisfies the request.

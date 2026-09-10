@@ -6,6 +6,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/) loosely and u
 
 ***
 
+## [1.2.2] - 2026-09-09
+
+> **Unpublished release candidate.** September 9 is the planned publication date; confirm the actual date before publishing.
+
+### Fixed
+
+- **Autosave collisions** — pre-compact hooks reserve filenames atomically, using seconds and collision suffixes. Discovery picks the newest modification time with deterministic filename ties, including legacy autosaves.
+- **Hook script renamed** — `post-compact-reminder.sh` is now `context-reminder.sh`. It stopped being post-compact-specific once it began firing on startup/resume, emitting the daily-log reminder, and surfacing session-end autosaves; Codex also invokes it for `PostCompact`, so the name is event-neutral. Upgrades remove the old script and its registrations automatically — a retired-script list in the installer deletes hook files AI Context no longer ships, which also clears the `session-log-check.sh` orphan left by the reminder move.
+- **Session-end capture** — a session ending with no log for today now writes a `sessionend-autosave.md` breadcrumb directly (end reason, branch, working tree, diffstat, recent commits, transcript pointer) instead of asking the agent to do it. Restores a guarantee documented since v0.4.x whose mechanism never worked: the retired hook emitted a reminder that Claude Code, Cursor, and Codex all discard at session end. Fires on every exit reason, `resume` included. Cursor's `sessionEnd` does not fire for cloud agents, so capture does not run there. The session-start hook surfaces autosaves from both sources, labels which kind, and reports how many are pending.
+- **Session-log reminders** — moved to session start for Claude Code, Cursor, and Codex with forward-looking wording. Upgrades remove retired Stop/sessionEnd handlers, broaden Claude’s matcher, and preserve user handlers sharing a registration. Legacy uninstall and reapply remain supported.
+
+### Changed
+
+- **Startup guidance** — adapters and shared rules now always read overview, active tasks, and recent sessions. Release history, layout, and standards are loaded by task. Session selection accounts for same-date logs and continuation references, with a three-log limit unless continuation requires more.
+- **Setup prompts** — fresh installs and upgrades no longer require a plan just to demonstrate the convention. Plans remain required for substantive work under the shared rules.
+- **Recovery documentation** — describes compaction recovery as best-effort, documents optional `jq` for transcript excerpts, and distinguishes emitted session-end reminders from delivery to the agent. Session-log reminders now run at session start; delivery claims remain qualified by configuration-level evidence.
+- **Roadmap** — reconciles context loading, task handoffs, portable workflows/vendor plugins, and hook reliability priorities while retaining deferred items.
+- **CI and packaging checks** — adds Node 24 to the test matrix and version-sync job (Node 24 is what `publish.yml` already builds and publishes on, so PR CI now covers it across all three operating systems), plus regression checks for startup-guidance parity and generic template packaging. Node 18+ compatibility is unchanged.
+
 ## [1.2.1] - 2026-05-31
 
 > **Headline:** Documentation release — new README positioning ("context infrastructure for AI coding agents"), a terminal demo, and a clearer install story. No code changes; the CLI is identical to 1.2.0.

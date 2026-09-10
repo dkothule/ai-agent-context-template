@@ -43,3 +43,8 @@ local/
 # Node
 node_modules/
 packages/*/node_modules/
+
+# This repository's own .ai-context/ is maintained outside version control here.
+# Adopters SHOULD commit their .ai-context/ — this ignore rule is specific to
+# the AI Context repository itself and is not part of the shipped template.
+.ai-context/

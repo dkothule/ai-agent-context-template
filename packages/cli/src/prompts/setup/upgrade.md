@@ -94,8 +94,7 @@ Please do only this:
    - .ai-context/standards/project.workflow.legacy.md
    Keep active local files focused on project-specific deltas.
 8. Add a short upgrade note to .ai-context/project.tasks.md or .ai-context/project.changelog.md.
-9. Write a plan to `.ai-context/plans/YYYY-MM-DD-ai-context-upgrade-vX.Y.Z.md` (use `.ai-context/plans/_template.md`) summarizing the upgrade, especially if any manual migration was needed. Reference it from `project.tasks.md`. This reinforces the plans convention.
-10. Do NOT replace placeholders/TBD text unless explicitly requested.
+9. Do NOT replace placeholders/TBD text unless explicitly requested.
 
 Done when:
 - current AI Context-owned files remain current,

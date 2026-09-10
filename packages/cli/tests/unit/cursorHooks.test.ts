@@ -18,7 +18,7 @@ beforeEach(async () => {
   await mkdir(join(cursorDir, 'hooks'), { recursive: true });
   await writeFile(join(cursorDir, 'hooks', 'pre-compact.sh'), '#!/bin/bash\nexit 0\n');
   await writeFile(join(cursorDir, 'hooks', 'session-log-check.sh'), '#!/bin/bash\nexit 0\n');
-  await writeFile(join(cursorDir, 'hooks', 'post-compact-reminder.sh'), '#!/bin/bash\nexit 0\n');
+  await writeFile(join(cursorDir, 'hooks', 'context-reminder.sh'), '#!/bin/bash\nexit 0\n');
   await mkdir(templateCursorDir, { recursive: true });
 });
 
@@ -31,7 +31,7 @@ const hasScript = (arr: Entry[] | undefined, script: string): boolean =>
   Array.isArray(arr) && arr.some((e) => e.command?.includes(script));
 
 describe('installCursorHooks — fresh install', () => {
-  it('writes a fresh hooks.json with all three events', async () => {
+  it('writes a fresh hooks.json with preCompact and sessionStart', async () => {
     const result = await installCursorHooks(templateCursorDir, tmpDir, false);
     expect(result.configMerged).toBe(true);
     expect(result.eventsMerged.sort()).toEqual(['preCompact', 'sessionEnd', 'sessionStart']);
@@ -40,8 +40,10 @@ describe('installCursorHooks — fresh install', () => {
     const config = JSON.parse(await readFile(join(cursorDir, 'hooks.json'), 'utf8'));
     expect(config.version).toBe(1);
     expect(hasScript(config.hooks.preCompact, 'pre-compact.sh')).toBe(true);
-    expect(hasScript(config.hooks.sessionEnd, 'session-log-check.sh')).toBe(true);
-    expect(hasScript(config.hooks.sessionStart, 'post-compact-reminder.sh')).toBe(true);
+    // sessionEnd now carries the session-end capture hook, not the retired reminder.
+    expect(hasScript(config.hooks.sessionEnd, 'session-end-capture.sh')).toBe(true);
+    expect(hasScript(config.hooks.sessionEnd, 'session-log-check.sh')).toBe(false);
+    expect(hasScript(config.hooks.sessionStart, 'context-reminder.sh')).toBe(true);
     expect(config.hooks.preCompact[0].command).toContain('git rev-parse --show-toplevel');
   });
 
@@ -83,8 +85,8 @@ describe('installCursorHooks — upgrade / idempotency', () => {
     expect(result.eventsMerged.sort()).toEqual(['preCompact', 'sessionEnd', 'sessionStart']);
 
     const merged = JSON.parse(await readFile(join(cursorDir, 'hooks.json'), 'utf8'));
-    expect(merged.hooks.sessionEnd).toHaveLength(1);
-    expect(merged.hooks.sessionEnd[0].command).toContain('git rev-parse --show-toplevel');
+    expect(hasScript(merged.hooks.sessionEnd, 'session-end-capture.sh')).toBe(true);
+    expect(hasScript(merged.hooks.sessionEnd, 'session-log-check.sh')).toBe(false);
     expect(merged.hooks.preCompact).toHaveLength(1);
     expect(merged.hooks.sessionStart).toHaveLength(1);
   });
@@ -95,7 +97,7 @@ describe('installCursorHooks — upgrade / idempotency', () => {
       hooks: {
         preCompact: [{ command: 'bash .cursor/hooks/pre-compact.sh' }],
         sessionEnd: [{ command: 'bash .cursor/hooks/session-log-check.sh' }],
-        sessionStart: [{ command: 'bash .cursor/hooks/post-compact-reminder.sh' }],
+        sessionStart: [{ command: 'bash .cursor/hooks/context-reminder.sh' }],
       },
     };
     await writeFile(join(cursorDir, 'hooks.json'), JSON.stringify(existing, null, 2));
@@ -107,7 +109,7 @@ describe('installCursorHooks — upgrade / idempotency', () => {
     const merged = JSON.parse(await readFile(join(cursorDir, 'hooks.json'), 'utf8'));
     expect(merged.hooks.preCompact).toHaveLength(1);
     expect(merged.hooks.preCompact[0].command).toContain('git rev-parse --show-toplevel');
-    expect(merged.hooks.sessionEnd[0].command).toContain('git rev-parse --show-toplevel');
+    expect(hasScript(merged.hooks.sessionEnd, 'session-end-capture.sh')).toBe(true);
     expect(merged.hooks.sessionStart[0].command).toContain('git rev-parse --show-toplevel');
   });
 
@@ -126,9 +128,11 @@ describe('installCursorHooks — upgrade / idempotency', () => {
 
     const merged = JSON.parse(await readFile(join(cursorDir, 'hooks.json'), 'utf8'));
     expect(merged.hooks.beforeShellExecution).toEqual(userOwned.hooks.beforeShellExecution);
-    expect(merged.hooks.sessionEnd).toHaveLength(2); // user + ours
+    // User handler preserved, plus the capture hook added additively.
+    expect(merged.hooks.sessionEnd).toHaveLength(2);
+    expect(hasScript(merged.hooks.sessionEnd, 'session-end-capture.sh')).toBe(true);
     expect(hasScript(merged.hooks.sessionEnd, 'my-session-end.sh')).toBe(true);
-    expect(hasScript(merged.hooks.sessionEnd, 'session-log-check.sh')).toBe(true);
+    expect(hasScript(merged.hooks.sessionEnd, 'session-log-check.sh')).toBe(false);
   });
 
   it('dry-run does not write anything', async () => {

@@ -26,19 +26,26 @@ Maintain consistent project understanding across multiple AI coding assistants. 
 
 ## Session Start — Tiered Reading
 
-Agents use a tiered approach to minimize context usage:
+All paths below are relative to `.ai-context/`.
 
-**Always read** (essential orientation):
-1. `project.overview.md`
-2. `project.changelog.md`
-3. Latest file in `sessions/` (excluding `_archive/`)
+Always read:
+1. `project.overview.md` — what this project is
+2. `project.tasks.md` — what is in flight, blocked, next
+3. Session logs in `sessions/` — never `_archive/`, never `_template.md`:
+   a. Newest by filename date. If several share that date, order by the
+      `time:` frontmatter field; where absent, fall back to filename order.
+   b. Scan the `# Session:` heading of the other same-date logs and read any
+      whose topic relates to the current task.
+   c. If that log's "Next Steps" or "Notes For Next Agent" points at earlier
+      work you are continuing, follow the reference.
+   Read at most 3 logs unless continuation references in (c) require more.
 
-**Then read based on task:**
+Then read based on task:
 - Writing/modifying code → `standards/project.rules.base.md`, `standards/project.rules.md`
+- Release/history context → `project.changelog.md`
+- Understanding layout → `project.structure.md`
 - Planning non-trivial work → `project.tasks.md`, `plans/`
-- Understanding codebase layout → `project.structure.md`
-- Continuing prior work → additional files in `sessions/`
-- Language/testing specifics → relevant files in `standards/`
+- Language/testing → files in `standards/`
 
 ## Agent Instructions
 

@@ -18,18 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/post-compact-reminder.sh\"",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/session-log-check.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/context-reminder.sh\"",
             "timeout": 30
           }
         ]
@@ -41,8 +30,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/post-compact-reminder.sh\"",
+            "command": "bash \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/context-reminder.sh\"",
             "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'd=\"$PWD\"; while [ -n \"$d\" ] && [ ! -f \"$d/.codex/hooks/session-end-capture.sh\" ]; do d=\"${d%/*}\"; done; [ -n \"$d\" ] && exec bash \"$d/.codex/hooks/session-end-capture.sh\"; exit 0'",
+            "timeout": 3
           }
         ]
       }
