@@ -28,7 +28,16 @@ beforeEach(async () => {
     const executable = name === 'node' ? process.execPath : name === 'bash' ? bash : tool(name);
     await writeFile(join(bin, name), `#!/bin/bash\nexec ${quote(executable)} "$@"\n`, { mode: 0o755 });
   }
-  env = { ...process.env, PATH: shellPath(bin) };
+  // Windows carries `Path`, not `PATH`. Spreading process.env and then adding
+  // `PATH` leaves TWO entries, and the child resolves against the inherited
+  // `Path` — so the restricted bin/ is never consulted and stubs are bypassed.
+  // Pass-through wrappers hide this (they behave the same either way); only
+  // tests that substitute different behaviour notice. Strip every case variant
+  // before setting ours so the isolation is real on all platforms.
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !/^path$/i.test(key)),
+  );
+  env = { ...inherited, PATH: shellPath(bin) };
 });
 afterEach(async () => { await rm(project, { recursive: true, force: true }); });
 
@@ -178,6 +187,30 @@ it('Claude post-compaction and Codex PostCompact regression', async () => {
 
 // Session-end capture. These bugs were all found by hand, not by the suite —
 // nothing here executed the capture script until now.
+// Canary for the harness itself. Most wrappers in bin/ are pass-throughs, so a
+// broken PATH substitution changes nothing and every test using them still
+// passes — which is exactly how Windows stayed green while resolving against
+// the inherited `Path` instead of bin/. This test fails loudly and by name if
+// stubs stop taking effect on any platform.
+describe('harness PATH isolation', () => {
+  it.each(agents)('%s hooks resolve tools from the stubbed bin, not the system', async agent => {
+    await writeFile(join(bin, 'date'), `#!/bin/bash
+case "$1" in
+  +%Y-%m-%d) printf '1999-12-31\\n';;
+  +%H%M%S) printf '235959\\n';;
+  *) printf 'stub\\n';;
+esac
+`, { mode: 0o755 });
+    const result = await run(agent, 'pre-compact.sh', { trigger: 'manual' });
+    expect(result.code).toBe(0);
+    const files = await readdir(sessions);
+    // A real `date` would produce today's timestamp; the sentinel proves the
+    // stub was used and therefore that PATH isolation holds.
+    expect(files, `stub date was bypassed — PATH isolation is broken (files=${JSON.stringify(files)})`)
+      .toContain('1999-12-31-235959-precompact-autosave.md');
+  });
+});
+
 describe('session-end capture', () => {
   const capture = 'session-end-capture.sh';
   const initRepo = async () => {
