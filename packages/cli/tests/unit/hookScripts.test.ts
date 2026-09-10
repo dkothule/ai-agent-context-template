@@ -6,10 +6,14 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const agents = ['claude', 'cursor', 'codex'];
-const bash = process.platform === 'win32' ? `${process.env.ProgramFiles}/Git/bin/bash.exe` : '/bin/bash';
+const bashLauncher = process.platform === 'win32' ? `${process.env.ProgramFiles}/Git/bin/bash.exe` : '/bin/bash';
+// Git/bin/bash.exe prepends Git's utilities to PATH, bypassing our stubs.
+// Use the actual shell for isolated execution, including our bin/bash wrapper.
+// https://gitforwindows.org/git-wrapper.html
+const bash = process.platform === 'win32' ? `${process.env.ProgramFiles}/Git/usr/bin/bash.exe` : '/bin/bash';
 const shellPath = (path: string) => path.replace(/\\/g, '/');
 const quote = (path: string) => `'${shellPath(path).replace(/'/g, "'\\''")}'`;
-const tool = (name: string) => execFileSync(bash, ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
+const tool = (name: string) => execFileSync(bashLauncher, ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
 let project: string;
 let sessions: string;
 let bin: string;
@@ -28,12 +32,8 @@ beforeEach(async () => {
     const executable = name === 'node' ? process.execPath : name === 'bash' ? bash : tool(name);
     await writeFile(join(bin, name), `#!/bin/bash\nexec ${quote(executable)} "$@"\n`, { mode: 0o755 });
   }
-  // Windows carries `Path`, not `PATH`. Spreading process.env and then adding
-  // `PATH` leaves TWO entries, and the child resolves against the inherited
-  // `Path` — so the restricted bin/ is never consulted and stubs are bypassed.
-  // Pass-through wrappers hide this (they behave the same either way); only
-  // tests that substitute different behaviour notice. Strip every case variant
-  // before setting ours so the isolation is real on all platforms.
+  // Avoid case-insensitive duplicate PATH keys in Windows child environments.
+  // This alone does not prevent the Git launcher from rewriting PATH above.
   const inherited = Object.fromEntries(
     Object.entries(process.env).filter(([key]) => !/^path$/i.test(key)),
   );
@@ -185,14 +185,27 @@ it('Claude post-compaction and Codex PostCompact regression', async () => {
   expect(output.hookSpecificOutput.additionalContext).not.toContain('write one before you finish');
 });
 
-// Session-end capture. These bugs were all found by hand, not by the suite —
-// nothing here executed the capture script until now.
-// Canary for the harness itself. Most wrappers in bin/ are pass-throughs, so a
-// broken PATH substitution changes nothing and every test using them still
-// passes — which is exactly how Windows stayed green while resolving against
-// the inherited `Path` instead of bin/. This test fails loudly and by name if
-// stubs stop taking effect on any platform.
+// Pass-through wrappers can hide broken isolation. Check both tool resolution
+// and substituted behavior so Windows cannot silently use system commands.
 describe('harness PATH isolation', () => {
+  it('keeps the isolated tools through direct and nested Bash launches', () => {
+    const probe = `
+printf 'PATH=%s\\n' "$PATH"
+for name in date git bash; do
+  type -a "$name"
+  [[ "$(command -v "$name")" -ef "$1/$name" ]] || exit 91
+done
+if command -v jq; then exit 92; fi
+`;
+    for (const args of [
+      ['-c', probe, 'probe', shellPath(bin)],
+      ['-c', 'exec bash -c "$1" probe "$2"', 'nested-probe', probe, shellPath(bin)],
+    ]) {
+      // execFileSync includes the probe's PATH/tool diagnostics on failure.
+      execFileSync(bash, args, { cwd: project, env, encoding: 'utf8' });
+    }
+  });
+
   it.each(agents)('%s hooks resolve tools from the stubbed bin, not the system', async agent => {
     await writeFile(join(bin, 'date'), `#!/bin/bash
 case "$1" in
