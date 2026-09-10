@@ -40,7 +40,20 @@ beforeEach(async () => {
   );
   env = { ...inherited, PATH: shellPath(bin) };
 });
-afterEach(async () => { await rm(project, { recursive: true, force: true }); });
+afterEach(async () => {
+  // An orphaned msys grandchild can still hold a handle for a moment after its
+  // parent dies, and Windows refuses rmdir while it does. Retry briefly, then
+  // leave it: these fixtures live in the OS temp directory, and a locked one
+  // must not fail an otherwise passing run.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(project, { recursive: true, force: true });
+      return;
+    } catch {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+  }
+});
 
 function run(agent: string, script = 'context-reminder.sh', input = {}, extraEnv = {}) {
   const file = fileURLToPath(new URL(`../../src/templates/${agent}/hooks/${script}`, import.meta.url));
@@ -62,11 +75,18 @@ async function runAndKill(args: string[], cwd: string, input: object, ms = 2_000
   let stderr = '';
   child.stdout.resume();
   child.stderr.on('data', data => { stderr += data; });
-  // Store spawn errors as values so they cannot become unhandled rejections
-  // while the deadline is pending.
-  const closed = new Promise<Error | null>(resolve => {
+  // Wait on 'exit' (the process is gone), not 'close' (all stdio drained).
+  // The launcher does `exec bash "$path"`, and msys emulates exec by spawning a
+  // fresh process rather than replacing the image — so the exec'd shell can
+  // outlive the pid Node holds, sit outside the Windows process tree taskkill
+  // walks, and keep the inherited pipes open. Requiring stdio EOF would then
+  // hang forever on something msys cannot guarantee. Process death is the
+  // property under test; drained pipes are not.
+  // Spawn errors are stored as values so they cannot become unhandled
+  // rejections while the deadline is pending.
+  const exited = new Promise<Error | null>(resolve => {
     child.once('error', resolve);
-    child.once('close', () => resolve(null));
+    child.once('exit', () => resolve(null));
   });
   child.stdin.on('error', () => { /* a spawn/early-exit error is reported below */ });
   child.stdin.end(JSON.stringify(input));
@@ -84,9 +104,9 @@ async function runAndKill(args: string[], cwd: string, input: object, ms = 2_000
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const error = await Promise.race([
-      closed,
+      exited,
       new Promise<Error>(resolve => {
-        timeout = setTimeout(() => resolve(new Error(`Hook tree did not close after termination: ${stderr}`)), 5_000);
+        timeout = setTimeout(() => resolve(new Error(`Hook did not exit after termination: ${stderr}`)), 5_000);
       }),
     ]);
     if (error) throw error;
