@@ -208,8 +208,10 @@ describe('runInstall — cursor hooks', () => {
 
     expect(existsSync(join(tmpDir, '.cursor', 'rules', 'main.mdc'))).toBe(true);
     expect(existsSync(join(tmpDir, '.cursor', 'hooks', 'pre-compact.sh'))).toBe(true);
-    expect(existsSync(join(tmpDir, '.cursor', 'hooks', 'session-log-check.sh'))).toBe(true);
-    expect(existsSync(join(tmpDir, '.cursor', 'hooks', 'post-compact-reminder.sh'))).toBe(true);
+    expect(existsSync(join(tmpDir, '.cursor', 'hooks', 'session-end-capture.sh'))).toBe(true);
+    // Retired in 1.2.2 — the reminder moved to session start, capture replaced it.
+    expect(existsSync(join(tmpDir, '.cursor', 'hooks', 'session-log-check.sh'))).toBe(false);
+    expect(existsSync(join(tmpDir, '.cursor', 'hooks', 'context-reminder.sh'))).toBe(true);
 
     const config = JSON.parse(await readFile(join(tmpDir, '.cursor', 'hooks.json'), 'utf8'));
     expect(config.version).toBe(1);
@@ -250,7 +252,9 @@ describe('runInstall — cursor hooks', () => {
     await runInstall({ targetDir: tmpDir, agents: ['cursor'] });
 
     const merged = JSON.parse(await readFile(join(tmpDir, '.cursor', 'hooks.json'), 'utf8'));
-    expect(merged.hooks.sessionEnd).toHaveLength(2); // user + ours
+    // User handler preserved; the capture hook is added alongside it.
+    expect(merged.hooks.sessionEnd).toHaveLength(2);
+    expect(merged.hooks.sessionEnd.some((e: { command: string }) => e.command.includes('session-end-capture.sh'))).toBe(true);
     expect(merged.hooks.sessionEnd.some((e: { command: string }) => e.command.includes('my-session-end.sh'))).toBe(true);
     expect(merged.hooks.preCompact).toHaveLength(1);
   });
@@ -260,33 +264,30 @@ describe('runInstall — codex hooks', () => {
   it('installs .codex/hooks.json (Claude-style schema) + config.toml + scripts when codex agent selected', async () => {
     const result = await runInstall({ targetDir: tmpDir, agents: ['codex'] });
     expect(result.codexHooksMerged).toBe(true);
-    expect(result.codexHooksEventsMerged?.sort()).toEqual(['PostCompact', 'PreCompact', 'SessionStart', 'Stop']);
+    expect(result.codexHooksEventsMerged?.sort()).toEqual(['PostCompact', 'PreCompact', 'SessionEnd', 'SessionStart']);
 
     expect(existsSync(join(tmpDir, 'AGENTS.md'))).toBe(true);
     expect(existsSync(join(tmpDir, '.codex', 'hooks', 'pre-compact.sh'))).toBe(true);
-    expect(existsSync(join(tmpDir, '.codex', 'hooks', 'session-log-check.sh'))).toBe(true);
-    expect(existsSync(join(tmpDir, '.codex', 'hooks', 'post-compact-reminder.sh'))).toBe(true);
+    expect(existsSync(join(tmpDir, '.codex', 'hooks', 'session-end-capture.sh'))).toBe(true);
+    // Retired in 1.2.2 — the reminder moved to session start, capture replaced it.
+    expect(existsSync(join(tmpDir, '.codex', 'hooks', 'session-log-check.sh'))).toBe(false);
+    expect(existsSync(join(tmpDir, '.codex', 'hooks', 'context-reminder.sh'))).toBe(true);
 
     const config = JSON.parse(await readFile(join(tmpDir, '.codex', 'hooks.json'), 'utf8'));
-    expect(Object.keys(config.hooks).sort()).toEqual(['PostCompact', 'PreCompact', 'SessionStart', 'Stop']);
+    expect(Object.keys(config.hooks).sort()).toEqual(['PostCompact', 'PreCompact', 'SessionEnd', 'SessionStart']);
     expect(config.hooks.PreCompact[0].matcher).toBe('manual|auto');
     expect(config.hooks.PreCompact[0].hooks[0].command).toContain('.codex/hooks/pre-compact.sh');
     expect(config.hooks.PostCompact[0].matcher).toBe('manual|auto');
-    expect(config.hooks.PostCompact[0].hooks[0].command).toContain('.codex/hooks/post-compact-reminder.sh');
+    expect(config.hooks.PostCompact[0].hooks[0].command).toContain('.codex/hooks/context-reminder.sh');
 
-    // Stop entry: nested hooks[] with type:'command' and git-root path
-    const stopHandler = config.hooks.Stop[0].hooks[0];
-    expect(stopHandler.type).toBe('command');
-    expect(stopHandler.command).toContain('git rev-parse --show-toplevel');
-    expect(stopHandler.command).toContain('.codex/hooks/session-log-check.sh');
-    expect(stopHandler.timeout).toBe(30);
+    expect(config.hooks.Stop).toBeUndefined();
 
     // SessionStart entry: matcher 'startup|resume' + nested type:'command' handler
     const sessionStartEntry = config.hooks.SessionStart[0];
     expect(sessionStartEntry.matcher).toBe('startup|resume');
     expect(sessionStartEntry.hooks[0].type).toBe('command');
     expect(sessionStartEntry.hooks[0].command).toContain('git rev-parse --show-toplevel');
-    expect(sessionStartEntry.hooks[0].command).toContain('.codex/hooks/post-compact-reminder.sh');
+    expect(sessionStartEntry.hooks[0].command).toContain('.codex/hooks/context-reminder.sh');
 
     // config.toml ensures the Codex hooks feature flag is enabled — without it,
     // Codex CLI will not load hooks.json at all.
@@ -312,5 +313,124 @@ describe('runInstall — codex hooks', () => {
 
     expect(await readFile(join(tmpDir, '.codex', 'hooks.json'), 'utf8')).toBe(first);
     expect(await readFile(join(tmpDir, '.codex', 'config.toml'), 'utf8')).toBe(firstToml);
+  });
+});
+
+// A 1.2.1 install has hook scripts under names 1.2.2 no longer ships, and config
+// entries pointing at them. `cp -r` copies the template over but never deletes,
+// so without installer-stage cleanup those orphans persist forever.
+describe('runInstall — upgrading a pre-1.2.2 install', () => {
+  const retired = ['session-log-check.sh', 'post-compact-reminder.sh'];
+
+  async function seedOldInstall(dir: string, config: string, contents: object) {
+    await mkdir(join(tmpDir, dir, 'hooks'), { recursive: true });
+    for (const script of retired) {
+      await writeFile(join(tmpDir, dir, 'hooks', script), '#!/bin/bash\nexit 0\n');
+    }
+    await writeFile(join(tmpDir, dir, config), JSON.stringify(contents, null, 2));
+  }
+
+  it('removes retired hook scripts and their registrations, for all three agents', async () => {
+    await seedOldInstall('.cursor', 'hooks.json', {
+      version: 1,
+      hooks: {
+        sessionEnd: [{ command: 'bash .cursor/hooks/session-log-check.sh' }],
+        sessionStart: [{ command: 'bash .cursor/hooks/post-compact-reminder.sh' }],
+        beforeShellExecution: [{ command: 'bash scripts/mine.sh' }],
+      },
+    });
+    await seedOldInstall('.codex', 'hooks.json', {
+      hooks: {
+        Stop: [{ hooks: [{ type: 'command', command: 'bash .codex/hooks/session-log-check.sh' }] }],
+        SessionStart: [{ hooks: [{ type: 'command', command: 'bash .codex/hooks/post-compact-reminder.sh' }] }],
+      },
+    });
+    await seedOldInstall('.claude', 'settings.json', {
+      hooks: {
+        Stop: [{ matcher: '', hooks: [{ type: 'command', command: 'bash .claude/hooks/session-log-check.sh' }] }],
+        SessionStart: [{ matcher: 'compact', hooks: [{ type: 'command', command: 'bash .claude/hooks/post-compact-reminder.sh' }] }],
+      },
+    });
+
+    await runInstall({ targetDir: tmpDir, agents: ['cursor', 'codex', 'claude'] });
+
+    for (const [dir, config] of [['.cursor', 'hooks.json'], ['.codex', 'hooks.json'], ['.claude', 'settings.json']]) {
+      // Orphaned script files are gone from disk...
+      for (const script of retired) {
+        expect(existsSync(join(tmpDir, dir, 'hooks', script)), `${dir}/${script} should be deleted`).toBe(false);
+      }
+      // ...their registrations are gone from config...
+      const raw = await readFile(join(tmpDir, dir, config), 'utf8');
+      for (const script of retired) {
+        expect(raw, `${dir}/${config} should not reference ${script}`).not.toContain(script);
+      }
+      // ...and the replacements are installed.
+      expect(existsSync(join(tmpDir, dir, 'hooks', 'context-reminder.sh'))).toBe(true);
+      expect(existsSync(join(tmpDir, dir, 'hooks', 'session-end-capture.sh'))).toBe(true);
+      expect(raw).toContain('context-reminder.sh');
+      expect(raw).toContain('session-end-capture.sh');
+    }
+
+    // A user-owned hook in the same file is untouched by any of it.
+    const cursor = JSON.parse(await readFile(join(tmpDir, '.cursor', 'hooks.json'), 'utf8'));
+    expect(cursor.hooks.beforeShellExecution).toEqual([{ command: 'bash scripts/mine.sh' }]);
+  });
+
+  it('leaves a user-authored script of the same name alone outside the hooks dir', async () => {
+    await mkdir(join(tmpDir, 'scripts'), { recursive: true });
+    const mine = join(tmpDir, 'scripts', 'post-compact-reminder.sh');
+    await writeFile(mine, '#!/bin/bash\n# user-authored, not ours\n');
+    await runInstall({ targetDir: tmpDir, agents: ['cursor'] });
+    expect(existsSync(mine)).toBe(true);
+    expect(await readFile(mine, 'utf8')).toContain('user-authored');
+  });
+});
+
+// Retired-script cleanup deletes files. Two constraints keep that safe, and a
+// leftover orphan is inert while a dangling registration is a broken hook —
+// so when in doubt, cleanup must NOT delete.
+describe('runInstall — retired hook cleanup safety', () => {
+  it('does not touch scripts belonging to agents that were not selected', async () => {
+    // A project already using Cursor; the user installs only Claude.
+    await mkdir(join(tmpDir, '.cursor', 'hooks'), { recursive: true });
+    const cursorScript = join(tmpDir, '.cursor', 'hooks', 'post-compact-reminder.sh');
+    await writeFile(cursorScript, '#!/bin/bash\nexit 0\n');
+    await writeFile(join(tmpDir, '.cursor', 'hooks.json'), JSON.stringify({
+      version: 1,
+      hooks: { sessionStart: [{ command: 'bash .cursor/hooks/post-compact-reminder.sh' }] },
+    }, null, 2));
+
+    await runInstall({ targetDir: tmpDir, agents: ['claude'] });
+
+    // Cursor was never selected, so its registration is untouched — deleting the
+    // script would leave that registration pointing at nothing.
+    const cursorConfig = await readFile(join(tmpDir, '.cursor', 'hooks.json'), 'utf8');
+    expect(cursorConfig).toContain('post-compact-reminder.sh');
+    expect(existsSync(cursorScript), 'unselected agent script must survive').toBe(true);
+  });
+
+  it('retains retired scripts when config migration is skipped', async () => {
+    await mkdir(join(tmpDir, '.cursor', 'hooks'), { recursive: true });
+    const script = join(tmpDir, '.cursor', 'hooks', 'post-compact-reminder.sh');
+    await writeFile(script, '#!/bin/bash\nexit 0\n');
+    // Unparseable config: the merge is skipped, so any existing registration
+    // survives and the script it names must survive with it.
+    await writeFile(join(tmpDir, '.cursor', 'hooks.json'), '{ not valid json');
+
+    const result = await runInstall({ targetDir: tmpDir, agents: ['cursor'] });
+
+    expect(result.cursorHooksMerged).toBe(false);
+    expect(existsSync(script), 'script must survive a skipped migration').toBe(true);
+  });
+
+  it('still cleans up when the merge is a no-op because hooks are already present', async () => {
+    // "Already present" is success, not failure — cleanup should proceed.
+    await runInstall({ targetDir: tmpDir, agents: ['cursor'] });
+    const stale = join(tmpDir, '.cursor', 'hooks', 'post-compact-reminder.sh');
+    await writeFile(stale, '#!/bin/bash\nexit 0\n');
+
+    const second = await runInstall({ targetDir: tmpDir, agents: ['cursor'] });
+    expect(second.cursorHooksMerged).toBe(false);
+    expect(existsSync(stale), 'idempotent re-install should still clean orphans').toBe(false);
   });
 });

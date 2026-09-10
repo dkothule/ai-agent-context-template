@@ -38,6 +38,25 @@ function getOwnPackageName(): string {
 }
 
 /** Paths managed by the installer (relative to target project root). */
+/**
+ * Hook scripts AI Context used to ship and no longer does. `cp -r` copies over
+ * the template but never deletes, so without this an upgrade leaves orphaned
+ * scripts in the target's hooks directory forever. Their config entries are
+ * removed by each agent's hook migration; this removes the files.
+ *
+ * Only ever add names AI Context itself shipped — never anything user-authored.
+ */
+const RETIRED_HOOK_SCRIPTS = [
+  'session-log-check.sh',       // retired 1.2.2: reminder moved to session start
+  'post-compact-reminder.sh',   // renamed 1.2.2 -> context-reminder.sh
+];
+
+const AGENT_HOOK_DIR: Record<string, string> = {
+  claude: '.claude/hooks',
+  cursor: '.cursor/hooks',
+  codex: '.codex/hooks',
+};
+
 const MANAGED_PATHS = [
   '.ai-context',
   '.cursor',
@@ -46,6 +65,44 @@ const MANAGED_PATHS = [
 ];
 
 const ROOT_INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'];
+
+/**
+ * Deletes retired hook scripts for ONE agent, and only once that agent's config
+ * migration has succeeded.
+ *
+ * Both constraints are load-bearing. Deleting for an agent the caller did not
+ * select would strand that agent's still-valid registration pointing at a
+ * missing file. Deleting before migration succeeds does the same thing when the
+ * config is unparseable and the merge is skipped — the registration survives,
+ * the script does not. A leftover orphan is inert; a dangling registration is a
+ * broken hook.
+ */
+async function removeRetiredHookScripts(
+  targetDir: string,
+  agent: string,
+  migrationOk: boolean,
+  dryRun: boolean,
+  onStep: (msg: string) => void,
+  onSkip: (msg: string) => void,
+): Promise<void> {
+  const dir = AGENT_HOOK_DIR[agent];
+  if (!dir) return;
+  if (!migrationOk) {
+    onSkip(`retired hook cleanup skipped for ${agent}: config migration did not complete`);
+    return;
+  }
+  for (const script of RETIRED_HOOK_SCRIPTS) {
+    const stale = join(targetDir, dir, script);
+    if (!existsSync(stale)) continue;
+    if (!dryRun) await rm(stale, { force: true });
+    onStep(`Removed retired hook ${dir}/${script}`);
+  }
+}
+
+/** A skipped merge is only safe to clean up after when nothing actually failed. */
+function migrationSucceeded(merged: boolean, skipReason?: string): boolean {
+  return merged || skipReason === 'AI Context hooks already present';
+}
 
 export interface InstallOptions {
   targetDir: string;
@@ -179,6 +236,14 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     } else if (hooksResult.settingsSkipReason) {
       onSkip(`hooks merge skipped: ${hooksResult.settingsSkipReason}`);
     }
+    await removeRetiredHookScripts(
+      targetDir,
+      'claude',
+      migrationSucceeded(hooksResult.settingsMerged, hooksResult.settingsSkipReason),
+      dryRun,
+      onStep,
+      onSkip,
+    );
   }
 
   // 5b. Install Cursor hooks (only when cursor agent selected — scripts come from copyTemplates)
@@ -192,6 +257,14 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     } else if (cursorHooksResult.configSkipReason) {
       onSkip(`cursor hooks merge skipped: ${cursorHooksResult.configSkipReason}`);
     }
+    await removeRetiredHookScripts(
+      targetDir,
+      'cursor',
+      migrationSucceeded(cursorHooksResult.configMerged, cursorHooksResult.configSkipReason),
+      dryRun,
+      onStep,
+      onSkip,
+    );
   }
 
   // 5c. Install Codex hooks (only when codex agent selected — scripts come from copyTemplates)
@@ -209,6 +282,14 @@ export async function runInstall(options: InstallOptions): Promise<InstallResult
     if (!codexHooksResult.configMerged && codexHooksResult.configSkipReason) {
       onSkip(`codex hooks merge skipped: ${codexHooksResult.configSkipReason}`);
     }
+    await removeRetiredHookScripts(
+      targetDir,
+      'codex',
+      migrationSucceeded(codexHooksResult.configMerged, codexHooksResult.configSkipReason),
+      dryRun,
+      onStep,
+      onSkip,
+    );
   }
 
   // 6. Rename legacy standards

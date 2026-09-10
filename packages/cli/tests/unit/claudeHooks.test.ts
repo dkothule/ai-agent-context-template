@@ -17,7 +17,7 @@ beforeEach(async () => {
   await mkdir(join(templateClaudeDir, 'hooks'), { recursive: true });
   await writeFile(join(templateClaudeDir, 'hooks', 'session-log-check.sh'), '#!/bin/bash\necho ok\n');
   await writeFile(join(templateClaudeDir, 'hooks', 'pre-compact.sh'), '#!/bin/bash\nexit 0\n');
-  await writeFile(join(templateClaudeDir, 'hooks', 'post-compact-reminder.sh'), '#!/bin/bash\nexit 0\n');
+  await writeFile(join(templateClaudeDir, 'hooks', 'context-reminder.sh'), '#!/bin/bash\nexit 0\n');
 });
 
 afterEach(async () => {
@@ -29,19 +29,19 @@ const findEntry = (arr: Entry[] | undefined, script: string): Entry | undefined 
   arr?.find((e) => e.hooks?.some((h) => h.command?.includes(script)));
 
 describe('installClaudeHooks — fresh install', () => {
-  it('installs Stop + PreCompact(manual/auto) + SessionStart(compact) into a missing settings.json', async () => {
+  it('installs PreCompact(manual/auto) + SessionStart(startup/resume/compact) into a missing settings.json', async () => {
     const result = await installClaudeHooks(templateClaudeDir, tmpDir, false);
     expect(result.settingsMerged).toBe(true);
 
     const merged = JSON.parse(await readFile(join(claudeDir, 'settings.json'), 'utf8'));
 
-    expect(findEntry(merged.hooks.Stop, 'session-log-check.sh')).toBeDefined();
-    expect(merged.hooks.Stop[0].hooks[0].command).toContain('CLAUDE_PROJECT_DIR');
+    expect(findEntry(merged.hooks.Stop, 'session-log-check.sh')).toBeUndefined();
+    expect(merged.hooks.Stop).toBeUndefined();
     expect(findEntry(merged.hooks.PreCompact, 'pre-compact.sh')).toBeDefined();
     expect(merged.hooks.PreCompact.some((e: Entry) => e.matcher === 'manual')).toBe(true);
     expect(merged.hooks.PreCompact.some((e: Entry) => e.matcher === 'auto')).toBe(true);
-    expect(findEntry(merged.hooks.SessionStart, 'post-compact-reminder.sh')).toBeDefined();
-    expect(merged.hooks.SessionStart[0].matcher).toBe('compact');
+    expect(findEntry(merged.hooks.SessionStart, 'context-reminder.sh')).toBeDefined();
+    expect(merged.hooks.SessionStart[0].matcher).toBe('startup|resume|compact');
   });
 
   it('merges into settings.json that has only permissions', async () => {
@@ -53,7 +53,7 @@ describe('installClaudeHooks — fresh install', () => {
 
     const merged = JSON.parse(await readFile(join(claudeDir, 'settings.json'), 'utf8'));
     expect(merged.permissions).toEqual({ allow: ['Bash'] });
-    expect(merged.hooks.Stop).toBeDefined();
+    expect(merged.hooks.Stop).toBeUndefined();
     expect(merged.hooks.PreCompact).toBeDefined();
     expect(merged.hooks.SessionStart).toBeDefined();
   });
@@ -89,8 +89,8 @@ describe('installClaudeHooks — upgrade / idempotency', () => {
     expect(result.settingsMerged).toBe(true);
 
     const merged = JSON.parse(await readFile(join(claudeDir, 'settings.json'), 'utf8'));
-    expect(merged.hooks.Stop).toHaveLength(1);
-    expect(merged.hooks.Stop[0].hooks[0].command).toContain('CLAUDE_PROJECT_DIR');
+    expect(merged.hooks.Stop).toBeUndefined();
+    expect(merged.hooks.Stop).toBeUndefined();
     expect(merged.hooks.PreCompact).toHaveLength(2);
     expect(merged.hooks.SessionStart).toHaveLength(1);
   });
@@ -117,7 +117,7 @@ describe('installClaudeHooks — upgrade / idempotency', () => {
         SessionStart: [
           {
             matcher: 'compact',
-            hooks: [{ type: 'command', command: 'bash .claude/hooks/post-compact-reminder.sh', timeout: 5000 }],
+            hooks: [{ type: 'command', command: 'bash .claude/hooks/context-reminder.sh', timeout: 5000 }],
           },
         ],
       },
@@ -126,10 +126,10 @@ describe('installClaudeHooks — upgrade / idempotency', () => {
 
     const result = await installClaudeHooks(templateClaudeDir, tmpDir, false);
     expect(result.settingsMerged).toBe(true);
-    expect(result.eventsMerged.sort()).toEqual(['PreCompact', 'SessionStart', 'Stop']);
+    expect(result.eventsMerged.sort()).toEqual(['PreCompact', 'SessionEnd', 'SessionStart', 'Stop']);
 
     const merged = JSON.parse(await readFile(join(claudeDir, 'settings.json'), 'utf8'));
-    expect(merged.hooks.Stop[0].hooks[0].command).toContain('CLAUDE_PROJECT_DIR');
+    expect(merged.hooks.Stop).toBeUndefined();
     expect(merged.hooks.PreCompact[0].hooks[0].command).toContain('CLAUDE_PROJECT_DIR');
     expect(merged.hooks.PreCompact[1].hooks[0].command).toContain('CLAUDE_PROJECT_DIR');
     expect(merged.hooks.SessionStart[0].hooks[0].command).toContain('CLAUDE_PROJECT_DIR');
@@ -153,9 +153,9 @@ describe('installClaudeHooks — upgrade / idempotency', () => {
 
     const merged = JSON.parse(await readFile(join(claudeDir, 'settings.json'), 'utf8'));
     expect(merged.hooks.PreToolUse).toEqual(userOwned.hooks.PreToolUse);
-    expect(merged.hooks.Stop).toHaveLength(2); // user + ours
+    expect(merged.hooks.Stop).toHaveLength(1); // user only
     expect(findEntry(merged.hooks.Stop, 'my-stop.sh')).toBeDefined();
-    expect(findEntry(merged.hooks.Stop, 'session-log-check.sh')).toBeDefined();
+    expect(findEntry(merged.hooks.Stop, 'session-log-check.sh')).toBeUndefined();
   });
 
   it('dry-run does not write anything', async () => {

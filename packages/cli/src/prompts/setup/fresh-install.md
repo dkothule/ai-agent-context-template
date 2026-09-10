@@ -118,8 +118,7 @@ Please do only this:
    - Reference each created file from `.ai-context/standards/project.rules.md` so agents know to read them.
    - DO NOT create these files if the repo doesn't have substantive evidence for them (e.g., single-script projects, docs-only repos). Skipping is fine.
    - DO NOT copy rules from external sources you can't verify against this specific codebase.
-10. Write a first plan to `.ai-context/plans/YYYY-MM-DD-ai-context-bootstrap.md` summarizing the bootstrap work (use `.ai-context/plans/_template.md`). This exercises the plans convention and gives future sessions a reference.
-11. Leave unknown placeholders/TBD text only where the repository does not provide enough evidence to fill them safely.
+10. Leave unknown placeholders/TBD text only where the repository does not provide enough evidence to fill them safely.
 
 Done when:
 - project.overview.md and project.structure.md reflect the actual repository,

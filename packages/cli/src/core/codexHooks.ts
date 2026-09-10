@@ -12,7 +12,7 @@ import { existsSync } from 'fs';
  * `copyTemplates` never overwrites a user's customised configuration.
  *
  * Codex exposes compaction lifecycle hooks, so we wire PreCompact autosave and
- * PostCompact reminder in addition to Stop and SessionStart.
+ * PostCompact reminder in addition to the forward-looking SessionStart reminder.
  *
  * Schema reference: https://developers.openai.com/codex/hooks
  *   - Same nested format as Claude Code: `event[].matcher? + event[].hooks[]`
@@ -21,14 +21,23 @@ import { existsSync } from 'fs';
  */
 const HOOK_SCRIPTS = {
   preCompact: 'pre-compact.sh',
-  stop: 'session-log-check.sh',
-  postCompact: 'post-compact-reminder.sh',
-  sessionStart: 'post-compact-reminder.sh',
+  stop: 'session-log-check.sh', // Legacy: remove on upgrade/uninstall.
+  postCompact: 'context-reminder.sh',
+  sessionStart: 'context-reminder.sh',
+  postCompactLegacy: 'post-compact-reminder.sh', // Legacy name: remove on upgrade/uninstall.
+  sessionEnd: 'session-end-capture.sh',
 } as const;
 
 const ALL_HOOK_SCRIPTS: string[] = [...new Set(Object.values(HOOK_SCRIPTS))];
 
 const HOOK_TIMEOUT_SECONDS = 30;
+
+/**
+ * Codex caps SessionEnd hooks at 1s default / 3s maximum and cancels unfinished
+ * hooks when the session ends. The capture script is budgeted for well under
+ * this (~120ms measured); do not raise it — Codex will reject or truncate.
+ */
+const SESSION_END_TIMEOUT_SECONDS = 3;
 
 interface CodexHookHandler {
   type: string;
@@ -63,8 +72,26 @@ function buildHookCommand(scriptName: string): string {
 }
 
 /**
+ * Session-end launcher. The normal launcher embeds `$(git rev-parse …)`, which
+ * the agent's shell evaluates BEFORE bash starts the script — so a slow git
+ * there defeats every in-script protection and the capture never runs at all.
+ * Session-end budgets are the tightest we have (Codex 1s/3s, Claude a shared
+ * 1.5s), so locate the script by walking parent directories with shell builtins.
+ * This handles a nested CWD without invoking Git before capture begins.
+ */
+function buildSessionEndCommand(scriptName: string): string {
+  const rel = `.codex/hooks/${scriptName}`;
+  // Walk up from CWD using shell builtins only. `git rev-parse` here would be
+  // unbounded and runs BEFORE bash starts the script, so a slow git would mean
+  // no capture at all — and CWD is not guaranteed to be the repository root.
+  // Exits 0 when nothing is found: a session must never fail to end here.
+  const walk = `d="$PWD"; while [ -n "$d" ] && [ ! -f "$d/${rel}" ]; do d="\${d%/*}"; done; [ -n "$d" ] && exec bash "$d/${rel}"; exit 0`;
+  return `bash -c '${walk}'`;
+}
+
+/**
  * Builds the hooks block AI Context installs into .codex/hooks.json.
- * Stop has no matcher (matches all). SessionStart matches `startup|resume`,
+ * SessionStart matches `startup|resume`,
  * which mirrors the schema example in the Codex docs.
  */
 function buildHooksBlock(): Record<string, CodexHookEntry[]> {
@@ -93,13 +120,15 @@ function buildHooksBlock(): Record<string, CodexHookEntry[]> {
         ],
       },
     ],
-    Stop: [
+    // Fires once per session at the boundary. Cannot inject context, so it
+    // captures to disk. Hard 3s ceiling — see SESSION_END_TIMEOUT_SECONDS.
+    SessionEnd: [
       {
         hooks: [
           {
             type: 'command',
-            command: buildHookCommand(HOOK_SCRIPTS.stop),
-            timeout: HOOK_TIMEOUT_SECONDS,
+            command: buildSessionEndCommand(HOOK_SCRIPTS.sessionEnd),
+            timeout: SESSION_END_TIMEOUT_SECONDS,
           },
         ],
       },
@@ -149,7 +178,7 @@ export async function installCodexHooks(
   const targetConfigToml = join(targetCodexDir, 'config.toml');
 
   void templateCodexDir;
-  const hooksCopied = existsSync(join(targetHooksDir, HOOK_SCRIPTS.stop));
+  const hooksCopied = existsSync(join(targetHooksDir, HOOK_SCRIPTS.preCompact));
 
   if (!dryRun) {
     await mkdir(targetCodexDir, { recursive: true });
@@ -175,14 +204,26 @@ interface MergeResult {
 
 function ourScriptInCommand(cmd?: string): string | null {
   if (!cmd) return null;
-  return ALL_HOOK_SCRIPTS.find((name) => cmd.includes(name)) ?? null;
+  // A same-named script outside our managed directory belongs to the user.
+  const normalized = cmd.replace(/\\/g, '/');
+  return ALL_HOOK_SCRIPTS.find((name) => {
+    const managedPath = '.codex/hooks/' + name;
+    const index = normalized.indexOf(managedPath);
+    if (index < 0) return false;
+    const before = normalized[index - 1];
+    const after = normalized[index + managedPath.length];
+    return (!before || /[\s/"']/.test(before)) && (!after || /[\s"';]/.test(after));
+  }) ?? null;
 }
 
-function entryUsesOurScript(entry: CodexHookEntry, scriptNames: string[]): boolean {
-  if (!Array.isArray(entry.hooks)) return false;
-  return entry.hooks.some((h) => {
-    const our = ourScriptInCommand(h.command);
-    return our !== null && scriptNames.includes(our);
+// Remove only our handlers. User siblings retain their matcher, metadata and order.
+// Matching ignores the old matcher so SessionStart can migrate without duplicates.
+function withoutOurHooks(entries: CodexHookEntry[]): CodexHookEntry[] {
+  return entries.flatMap((entry) => {
+    if (!Array.isArray(entry.hooks)) return [entry];
+    const hooks = entry.hooks.filter((handler) => ourScriptInCommand(handler.command) === null);
+    if (hooks.length === entry.hooks.length) return [entry];
+    return hooks.length ? [{ ...entry, hooks }] : [];
   });
 }
 
@@ -218,39 +259,18 @@ async function mergeHooksIntoConfig(
 
   const eventsMerged: string[] = [];
 
-  for (const [event, ourEntries] of Object.entries(ours)) {
-    const existingArr = Array.isArray(mergedHooks[event]) ? mergedHooks[event] : [];
-    const toAdd: CodexHookEntry[] = [];
-
-    for (const ourEntry of ourEntries) {
-      const ourScriptNames = ourEntry.hooks
-        .map((h) => ourScriptInCommand(h.command))
-        .filter((n): n is string => n !== null);
-
-      const existingIdx = existingArr.findIndex(
-        (e) =>
-          (e.matcher ?? '') === (ourEntry.matcher ?? '') && entryUsesOurScript(e, ourScriptNames),
-      );
-
-      if (existingIdx >= 0) {
-        const existingEntry = existingArr[existingIdx];
-        const existingHandlers = JSON.stringify(existingEntry.hooks ?? []);
-        const ourHandlers = JSON.stringify(ourEntry.hooks);
-        if (existingHandlers !== ourHandlers) {
-          existingArr[existingIdx] = ourEntry;
-          eventsMerged.push(event);
-        }
-      } else {
-        toAdd.push(ourEntry);
-      }
-    }
-
-    if (toAdd.length > 0) {
-      mergedHooks[event] = [...existingArr, ...toAdd];
-      if (!eventsMerged.includes(event)) eventsMerged.push(event);
-    } else if (eventsMerged.includes(event)) {
-      mergedHooks[event] = existingArr;
-    }
+  // Normalize our registrations across all events (including retired ones),
+  // preserving user handlers before adding the current canonical registrations.
+  for (const event of new Set([...Object.keys(existingHooks), ...Object.keys(ours)])) {
+    const previous = existingHooks[event];
+    const userEntries = Array.isArray(previous) ? withoutOurHooks(previous) : [];
+    const next = [...userEntries, ...(ours[event] ?? [])];
+    // Preserve unrelated events, including empty arrays, exactly as supplied.
+    if (!ours[event] && JSON.stringify(previous) === JSON.stringify(userEntries)) continue;
+    if (JSON.stringify(previous) === JSON.stringify(next)) continue;
+    if (next.length) mergedHooks[event] = next;
+    else delete mergedHooks[event];
+    eventsMerged.push(event);
   }
 
   if (eventsMerged.length === 0) {
@@ -538,8 +558,8 @@ export async function removeCodexHooks(
   for (const event of Object.keys(hooks)) {
     const arr = hooks[event];
     if (!Array.isArray(arr)) continue;
-    const filtered = arr.filter((entry) => !entryUsesOurScript(entry, ALL_HOOK_SCRIPTS));
-    if (filtered.length !== arr.length) removedAny = true;
+    const filtered = withoutOurHooks(arr);
+    if (JSON.stringify(filtered) !== JSON.stringify(arr)) removedAny = true;
     if (filtered.length === 0) {
       delete hooks[event];
     } else {
